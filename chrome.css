@@ -130,3 +130,82 @@
 #tabbrowser-tabpanels [bgzen-loading] #uc-loadingbar {
   visibility: visible !important;
 }
+
+/* =============================================
+   §6  BOOT SPLASH — les pseudos #main-window::before
+   et ::after (pan boot.jpg + image tirée) vivent
+   dans le userChrome.css du PROFIL : Sine injecte
+   ce fichier à DOMContentLoaded, trop tard pour le
+   frame 0. On ne les redéfinit PAS ici (même
+   spécificité, sheet Sine chargée après → elles
+   écraseraient le pan). Ne reste ici que le titre
+   (élément réel, créé par le JS — timing OK) et
+   ses anims.
+   ============================================= */
+
+/* Phrase d'accueil façon ZenWelcome — citation aléatoire
+   (citation.lecog.fr, cachée localement) :
+   1er span = texte, 2e = auteur. Fallback CONFIG.bootTitle. */
+#bgzen-boot-title {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.2rem;
+  pointer-events: none;
+  --zen-primary-color: light-dark(black, white);
+  color: var(--zen-primary-color);
+  font-weight: 500;
+  text-align: center;
+  /* lueur de lisibilité sur wallpaper aléatoire */
+  text-shadow: 0 1px 24px light-dark(rgb(255 255 255 / 70%), rgb(0 0 0 / 70%));
+}
+
+#bgzen-boot-title span {
+  display: block;
+  opacity: 0;
+}
+
+#bgzen-boot-title span:first-child {
+  font-size: clamp(1.6rem, 3vw, 2.6rem);
+  font-style: italic;
+  line-height: 1.35;
+  max-width: min(70vw, 60rem);
+  white-space: normal;
+}
+
+#bgzen-boot-title span:last-child {
+  font-size: clamp(1rem, 1.4vw, 1.4rem);
+  font-weight: 400;
+  opacity: 0.85;
+}
+
+/* Fallback keyframes si le moteur motion de Zen est
+   indisponible au boot (anim JS = spring stagger). */
+@keyframes bgzen-boot-in {
+  from { opacity: 0; transform: translateY(20px); filter: blur(2px); }
+  to   { opacity: 1; transform: none;            filter: blur(0); }
+}
+
+#bgzen-boot-title.bgzen-css-anim span {
+  animation: bgzen-boot-in 0.9s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+#bgzen-boot-title.bgzen-css-anim span:nth-child(2) {
+  animation-delay: 0.35s;
+}
+
+/* Sortie du titre — façon fadeOut du welcome
+   (opacity + y -10px + blur montant). */
+#bgzen-boot-title.bgzen-boot-out {
+  opacity: 0;
+  transform: translateY(-10px);
+  filter: blur(2px);
+  transition:
+    opacity 400ms ease,
+    transform 400ms ease,
+    filter 400ms ease;
+}

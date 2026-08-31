@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           BG-Zen
-// @version        0.4.1
+// @version        0.5.0
 // @description    Wallpaper derrière l'UI de Zen — pools repos/loading, glass constant, splash
 // @author         Impre
 // @include        main
@@ -29,6 +29,12 @@
         barTotalMs: 1000,  // barre (850) + 150ms de grâce paint : le contenu
                            // a le temps d'être affiché avant le reveal
         stabilizeMs: 2000, // pas de re-tirage loading si reveal < 2s (anti double-image)
+        bootFadeMs: 600,   // fade de sortie du boot splash (pseudo ::after CSS §6)
+        bootTimeoutMs: 15000, // LAST RESORT : filet si aucun STOP ne survient jamais
+        bootTitle: ['Welcome to', 'a calmer internet'], // fallback si pas de citation en cache
+        bootQuote: true,   // citation aléatoire en phrase d'accueil (citation.lecog.fr, cache local)
+        quoteUrl: 'https://citation.lecog.fr/public/api/random-quote.php',
+        bootMinMs: 2500,   // durée MINIMALE du boot splash — l'anim a le temps de vivre
         debug: true,       // logs fichier (bgzen-debug.log) — false en prod
         imageExts: ['.png', '.jpg', '.jpeg', '.webp', '.avif', '.gif', '.jxl', '.svg'],
     };
@@ -36,6 +42,7 @@
     const MOD_DIR = PathUtils.join(PathUtils.profileDir, 'chrome', 'sine-mods', 'BG-Zen');
     const BG_DIR = PathUtils.join(MOD_DIR, 'backgrounds');
     const LD_DIR = PathUtils.join(MOD_DIR, 'loadings');
+    const QUOTE_FILE = PathUtils.join(MOD_DIR, 'boot', 'quote.json'); // cache runtime → gitignore
     const REST_LAYER_ID = 'bgzen-layer';
     const LD_LAYER_ID = 'bgzen-loading-layer';
 
@@ -198,6 +205,152 @@
         return { rest, loading };
     }
 
+    /* ---------- BootSplash ---------- */
+    // Splash FULL-UI au lancement (enquête zen-boot-splash 31/08) :
+    // le pseudo #main-window::after (CSS §6, userChrome = frame 0,
+    // AVANT tout JS) couvre tout — l'écran gris natif
+    // (#zen-browser-background) et le shuffle de sélection de Zen au
+    // démarrage ne se voient jamais. Titre + anims repris du welcome
+    // natif (ZenWelcome.mjs) : gZenUIManager.motion = moteur spring
+    // de Zen, fallback keyframes CSS s'il n'est pas prêt au boot.
+    // Retrait : 1er REVEAL (fin de session homepage) ou failsafe.
+
+    const BootSplash = {
+        titleEl: null,
+        guard: null,
+        installAt: 0,
+        done: false,
+
+        // Splash uniquement sur la fenêtre du démarrage : à l'ouverture
+        // d'une fenêtre en cours de session (Ctrl+N), d'autres fenêtres
+        // existent déjà → pas de boot splash (sinon UI recouverte).
+        isStartupWindow() {
+            try {
+                let n = 0;
+                for (const w of Services.wm.getEnumerator('navigator:browser')) n++;
+                return n <= 1;
+            } catch (ex) {
+                dbg('isStartupWindow erreur:', ex.message);
+                return false;
+            }
+        },
+
+        async install() {
+            const mw = document.getElementById('main-window');
+            this.installAt = Date.now();
+            // Phrase d'accueil : citation CACHÉE LOCALEMENT (jamais de
+            // réseau au boot — celle affichée a été prefetchée au boot
+            // précédent). Pas de cache → texte CONFIG.bootTitle.
+            const quote = CONFIG.bootQuote ? await this.loadQuote() : null;
+            const lines = quote
+                ? [quote.text, `— ${quote.author}`]
+                : CONFIG.bootTitle;
+            const title = document.createElement('div');
+            title.id = 'bgzen-boot-title';
+            for (const text of lines) {
+                const span = document.createElement('span');
+                span.textContent = text;
+                title.appendChild(span);
+            }
+            mw.appendChild(title);
+            this.titleEl = title;
+            this.animateIn();
+            // LAST RESORT: aucun événement ne garantit qu'une session de
+            // chargement démarre au boot — sans ce filet, un STOP perdu
+            // laisserait le splash à l'écran (navigateur inutilisable).
+            this.guard = setTimeout(
+                () => this.finish('FAILSAFE timeout'), CONFIG.bootTimeoutMs);
+            dbg(quote
+                ? `▶️ BOOT splash installé (citation de ${quote.author || 'anonyme'})`
+                : '▶️ BOOT splash installé (texte défaut — pas de citation en cache)');
+        },
+
+        async loadQuote() {
+            try {
+                const q = await IOUtils.readJSON(QUOTE_FILE);
+                if (q?.text) return q;
+            } catch { /* pas de cache au 1er boot */ }
+            return null;
+        },
+
+        // Pour le PROCHAIN boot : fetch lancé APRÈS le retrait du splash
+        // (le réseau est plus lent que le boot — on ne l'attend jamais).
+        // Event-chained, zéro polling, échec silencieux (cache conservé).
+        prefetchQuote() {
+            fetch(CONFIG.quoteUrl)
+                .then(r => r.json())
+                .then(j => {
+                    if (!j?.success || !j.data?.text) throw new Error('réponse invalide');
+                    const a = j.data.author ?? {};
+                    const author = [a.forename, a.name].filter(Boolean).join(' ');
+                    return IOUtils.writeJSON(QUOTE_FILE,
+                        { text: j.data.text, author },
+                        { tmpPath: 'bgzen-quote-tmp.json' });
+                })
+                .then(() => dbg('cita préfetchée pour le prochain boot'))
+                .catch(ex => dbg('cita prefetch échec:', ex.message ?? String(ex)));
+        },
+
+        // Anim d'entrée façon ZenWelcome.animateInitialStage : spring
+        // stagger natif (stiffness 300 / damping 20 / mass 1.8).
+        // Moteur absent/prêt trop tard → fallback keyframes CSS.
+        animateIn() {
+            try {
+                const motion = window.gZenUIManager?.motion;
+                if (!motion) throw new Error('motion indisponible');
+                motion.animate(
+                    '#bgzen-boot-title span',
+                    { opacity: [0, 1], y: [20, 0], filter: ['blur(2px)', 'blur(0px)'] },
+                    {
+                        delay: motion.stagger(0.6, { startDelay: 0.2 }),
+                        type: 'spring', stiffness: 300, damping: 20, mass: 1.8,
+                    },
+                ).then(
+                    () => dbg('BOOT titre animé (motion spring natif de Zen)'),
+                    () => {
+                        this.titleEl?.classList.add('bgzen-css-anim');
+                        dbg('BOOT motion rejet → fallback CSS');
+                    },
+                );
+            } catch {
+                this.titleEl?.classList.add('bgzen-css-anim');
+                dbg('BOOT titre animé (fallback CSS — motion absent)');
+            }
+        },
+
+        // Dès que l'image de loading est pré-tirée ET décodée : posée
+        // sur le pseudo ::after (userChrome §boot) → fade-in par-dessus
+        // le pan boot.jpg, qui est gelé (visibility hidden + pause →
+        // plus rien ne coûte). Le START du homepage re-posera le MÊME
+        // fichier (applyLoading) → aucun pop.
+        revealImage() {
+            if (this.done || !Resolver.nextLoading) return;
+            Resolver.setVar('--bgzen-loading-image', Resolver.nextLoading);
+            document.getElementById('main-window')?.setAttribute('bgzen-boot-image', '');
+            dbg('BOOT image posée → fade-in par-dessus le pan (pan gelé)');
+        },
+
+        // Appelé au 1er REVEAL : sortie façon welcome (titre fade +
+        // y -10px + blur) puis pseudo ::after → opacity 0 (fade §6).
+        // Idempotent — les REVEAL suivants ne repassent pas ici.
+        finish(reason) {
+            if (this.done) return;
+            this.done = true;
+            clearTimeout(this.guard);
+            // Durée minimale : si la homepage charge plus vite que
+            // bootMinMs, on laisse l'anim vivre avant de sortir. Si elle
+            // est plus lente, hold = 0 → sortie immédiate au REVEAL.
+            const hold = Math.max(0, CONFIG.bootMinMs - (Date.now() - this.installAt));
+            setTimeout(() => {
+                this.titleEl?.classList.add('bgzen-boot-out');
+                document.getElementById('main-window')?.setAttribute('bgzen-booted', '');
+                setTimeout(() => this.titleEl?.remove(), CONFIG.bootFadeMs + 100);
+            }, hold);
+            dbg(`🏁 BOOT splash — sortie dans ${hold}ms (${reason})`);
+            this.prefetchQuote(); // citation du PROCHAIN boot — réseau post-splash
+        },
+    };
+
     /* ---------- SplashController ---------- */
 
     function getDomain(browser) {
@@ -281,6 +434,7 @@
                         container?.toggleAttribute('bgzen-loading', false); // reveal
                         lastRevealAt = Date.now();
                         dbg(`✅ REVEAL (fin anim ${CONFIG.exitMs}ms)`);
+                        BootSplash.finish('1er REVEAL'); // boot splash : on rend la main à l'UI
                         // Pré-tirage de la prochaine image — ne touche pas la
                         // var (fade de sortie intact), event-chained, zéro timer.
                         Resolver.prefetchLoading();
@@ -318,14 +472,22 @@
         const layers = createLayers();
         if (!layers) { log('ERREUR — #main-window introuvable'); return; }
 
-        dbg(`=== SESSION BG-Zen v0.4.1 — debug ${CONFIG.debug ? 'ACTIF' : 'off'} (fichier réinitialisé) ===`);
+        dbg(`=== SESSION BG-Zen v0.5.0 — debug ${CONFIG.debug ? 'ACTIF' : 'off'} (fichier réinitialisé) ===`);
         dbg(`CONFIG enter=${CONFIG.enterMs}ms exit=${CONFIG.exitMs}ms bar=${CONFIG.barTotalMs}ms grâce=${CONFIG.stabilizeMs}ms`);
 
+        // Pré-tirage de la 1ère image de loading : invisible pendant le
+        // boot (le pan boot.jpg couvre tout), mais CASH pour la 1ère
+        // navigation d'après le reveal.
         Resolver.resolveRest(getDomain(gBrowser.selectedBrowser))
-            .then(() => Resolver.prefetchLoading()); // 1ère image prête avant la 1ère nav
+            .then(() => Resolver.prefetchLoading());
         setupProgress(layers.loading);
         setupTabSelect();
-        log('init v0.4.1 — grâce paint 150ms (barTotalMs 1000) + switch cash + warm-up décodage');
+        // Boot splash : uniquement sur la fenêtre de démarrage. Les
+        // fenêtres ouvertes en cours de session (Ctrl+N) passent direct
+        // en mode nav — attribut posé avant le 1er paint, aucun flash.
+        if (BootSplash.isStartupWindow()) BootSplash.install();
+        else document.getElementById('main-window')?.setAttribute('bgzen-booted', '');
+        log('init v0.5.0 — boot splash full-UI (frame 0 userChrome + citation) + grâce paint + switch cash + warm-up');
     }
 
     if (document.readyState === 'complete' || document.readyState === 'interactive') init();

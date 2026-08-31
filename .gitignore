@@ -4,5 +4,8 @@ backgrounds/*
 loadings/*
 !loadings/.gitkeep
 
+# Boot splash : image perso + cache citation — data runtime
+boot/*
+
 # Log debug runtime — data, jamais commité
 bgzen-debug.log
