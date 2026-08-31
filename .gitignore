@@ -3,3 +3,6 @@ backgrounds/*
 !backgrounds/default.png
 loadings/*
 !loadings/.gitkeep
+
+# Log debug runtime — data, jamais commité
+bgzen-debug.log

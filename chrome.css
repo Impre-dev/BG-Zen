@@ -79,9 +79,12 @@
   opacity: 1;
   visibility: visible;
   filter: blur(0px);
+  /* Entrée CASH : opaque frame 0 — l'image est pré-tirée et posée en
+     synchrone au START, le repos n'est jamais visible. Seul le de-blur
+     anime. La sortie (état de base) garde son fade + blur montant. */
   transition:
-    opacity 150ms ease,
-    filter 150ms ease;
+    opacity 0s,
+    filter var(--bgzen-enter, 300ms) ease;
 }
 
 /* =============================================
