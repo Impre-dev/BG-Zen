@@ -86,21 +86,25 @@
 
 /* =============================================
    §3  SIDEBAR GLASS — au hover du toolbox
+   (design fork : la sidebar n'apparaît qu'au
+   hover, bg aligné volontairement NET).
    Technique : background-attachment: fixed ancre
    l'image au VIEWPORT → même scène alignée que
    la couche, continuation pixel-perfect.
+   Nouveau : calque linear-gradient(--bgzen-glass)
+   par-dessus l'image = le "filtre foncé" du
+   repos, sans pseudo-élément.
    ============================================= */
 
 #browser:has(#navigator-toolbox[zen-has-hover='true']) #titlebar {
-  background-image: var(--bgzen-image) !important;
+  background-image:
+    linear-gradient(var(--bgzen-glass), var(--bgzen-glass)),
+    var(--bgzen-image) !important;
   background-size: cover !important;
   background-position: center !important;
   background-repeat: no-repeat !important;
   background-attachment: fixed !important;
 
-  /* Glass façon fork : givre ce qui est derrière (contenu web + couche wallpaper).
-     NB : backdrop-filter ne floute PAS le background de l'élément lui-même —
-     l'image alignée reste nette, le tint glass la teinte. */
   backdrop-filter: var(--bgzen-glass-filter) !important;
   box-shadow: var(--bgzen-glass-shadow) !important;
   border-radius: 6px !important;
