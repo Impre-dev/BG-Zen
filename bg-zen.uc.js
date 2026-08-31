@@ -39,7 +39,9 @@
         // URL absolue du wallpaper — posée en var CSS pour que chrome.css
         // l'utilise partout (couche + glass hover §3). Ne dépend pas de
         // la résolution d'URL relative de la feuille.
-        const imgURL = Services.io.newURI(PathUtils.join(MOD_DIR, CONFIG.image)).spec;
+        // toFileURI → véritable file:///C:/... (newURI sur un chemin Windows
+        // rend des backslashes, mangés par les escapes CSS dans url("..."))
+        const imgURL = PathUtils.toFileURI(PathUtils.join(MOD_DIR, CONFIG.image));
         document.documentElement.style.setProperty('--bgzen-image', `url("${imgURL}")`);
         document.documentElement.style.setProperty('--bgzen-blur', `${CONFIG.blurPx}px`);
 
