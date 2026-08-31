@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           BG-Zen
-// @version        0.4.0
+// @version        0.4.1
 // @description    Wallpaper derrière l'UI de Zen — pools repos/loading, glass constant, splash
 // @author         Impre
 // @include        main
@@ -26,7 +26,8 @@
         restBlurPx: 10,    // glass constant au repos
         enterMs: 300,      // anim d'ENTRÉE de la couche loading (fade + de-blur)
         exitMs: 400,       // anim de sortie de la couche loading (pt 5)
-        barTotalMs: 850,   // synchro MyLoadingBar (150 + 400 + 300)
+        barTotalMs: 1000,  // barre (850) + 150ms de grâce paint : le contenu
+                           // a le temps d'être affiché avant le reveal
         stabilizeMs: 2000, // pas de re-tirage loading si reveal < 2s (anti double-image)
         debug: true,       // logs fichier (bgzen-debug.log) — false en prod
         imageExts: ['.png', '.jpg', '.jpeg', '.webp', '.avif', '.gif', '.jxl', '.svg'],
@@ -317,14 +318,14 @@
         const layers = createLayers();
         if (!layers) { log('ERREUR — #main-window introuvable'); return; }
 
-        dbg(`=== SESSION BG-Zen v0.4.0 — debug ${CONFIG.debug ? 'ACTIF' : 'off'} (fichier réinitialisé) ===`);
+        dbg(`=== SESSION BG-Zen v0.4.1 — debug ${CONFIG.debug ? 'ACTIF' : 'off'} (fichier réinitialisé) ===`);
         dbg(`CONFIG enter=${CONFIG.enterMs}ms exit=${CONFIG.exitMs}ms bar=${CONFIG.barTotalMs}ms grâce=${CONFIG.stabilizeMs}ms`);
 
         Resolver.resolveRest(getDomain(gBrowser.selectedBrowser))
             .then(() => Resolver.prefetchLoading()); // 1ère image prête avant la 1ère nav
         setupProgress(layers.loading);
         setupTabSelect();
-        log('init v0.4.0 — switch cash + warm-up décodage + garde + grâce + logs fichier');
+        log('init v0.4.1 — grâce paint 150ms (barTotalMs 1000) + switch cash + warm-up décodage');
     }
 
     if (document.readyState === 'complete' || document.readyState === 'interactive') init();
