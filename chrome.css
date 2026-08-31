@@ -1,11 +1,11 @@
 /* ============================================
-   BG-Zen — chrome.css
-   Feuille stylique du mod. La var --bgzen-image
-   (URL absolue file://) est posée par bg-zen.uc.js.
-   ⚠️ NE JAMAIS peindre d'image sur #main-window
-   (bug de transparence des pages — voir SPEC).
-   Prérequis : prefs Zen Mica + transparence UI ON,
-   Nebula (UI translucide) actif.
+   BG-Zen — chrome.css v0.2.0 (roadmap pt 1)
+   Deux couches dans #main-window (isolation §0) :
+   • #bgzen-layer         → repos, glass CONSTANT (var --bgzen-blur)
+   • #bgzen-loading-layer → loading screen nette, fade + blur en sortie
+   Vars posées par bg-zen.uc.js :
+   --bgzen-image, --bgzen-loading-image, --bgzen-blur, --bgzen-exit
+   ⚠️ NE JAMAIS peindre d'image sur #main-window (bug transparence).
    ============================================ */
 
 :root {
@@ -14,15 +14,17 @@
   --bgzen-glass-filter: blur(32px) saturate(140%);
   --bgzen-glass-shadow: rgb(0 0 0 / 20%) 0 20px 40px;
 
-  /* --- Posées par bg-zen.uc.js (URL absolue + intensité) --- */
-  /* --bgzen-image: url("file:///...BG_Zen.png"); */
-  /* --bgzen-blur: 24px; */
+  /* --- Posées par bg-zen.uc.js (URL absolues + valeurs CONFIG) --- */
+  /* --bgzen-image: url("file:///...");          repos    */
+  /* --bgzen-loading-image: url("file:///...");  loading  */
+  /* --bgzen-blur: 10px;  --bgzen-exit: 400ms;             */
 }
 
 /* =============================================
-   §0  STACKING — sans ceci, l'enfant z-index:-1
-   passe SOUS le fond de #main-window (invisible).
-   isolation:isolate le force en stacking context.
+   §0  STACKING — isolation:isolate force
+   #main-window en stacking context → les couches
+   z-index:-1 se peignent au-dessus de son fond,
+   sous toute l'UI.
    ============================================= */
 
 #main-window {
@@ -30,11 +32,9 @@
 }
 
 /* =============================================
-   §1  COUCHE WALLPAPER — premier enfant de
-   #main-window, z-index: -1 (au-dessus du fond de
-   la fenêtre, sous toute l'UI). Créée par
-   bg-zen.uc.js. Blur au repos ; le listener
-   bascule filter blur(0px) ↔ blur(24px) inline.
+   §1  COUCHE REPOS — wallpaper glass constant.
+   Nouveau tirage par changement de domaine
+   (WallpaperResolver). Plus de toggle blur.
    ============================================= */
 
 #bgzen-layer {
@@ -46,8 +46,42 @@
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
-  filter: blur(var(--bgzen-blur, 24px)); /* idée #5 : flou au repos */
-  transition: filter 500ms ease;
+  filter: blur(var(--bgzen-blur, 10px)); /* glass constant */
+}
+
+/* =============================================
+   §1bis  COUCHE LOADING — par-dessus la couche
+   repos (même z-index, après dans le DOM).
+   Entrée : rapide (150ms). Sortie : fade + blur
+   montants sur --bgzen-exit (anim pt 5 roadmap).
+   ============================================= */
+
+#bgzen-loading-layer {
+  position: fixed;
+  inset: -64px;
+  z-index: -1;
+  pointer-events: none;
+  background-image: var(--bgzen-loading-image);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: 0;
+  visibility: hidden;
+  filter: blur(16px);
+  /* sortie : fade + blur, visibility retardée pour laisser l'anim finir */
+  transition:
+    opacity var(--bgzen-exit, 400ms) ease,
+    filter var(--bgzen-exit, 400ms) ease,
+    visibility 0s linear var(--bgzen-exit, 400ms);
+}
+
+#bgzen-loading-layer[bgzen-active] {
+  opacity: 1;
+  visibility: visible;
+  filter: blur(0px);
+  transition:
+    opacity 150ms ease,
+    filter 150ms ease;
 }
 
 /* =============================================
@@ -74,8 +108,7 @@
 
 /* =============================================
    §5  SPLASH — masquage total du wrapper pendant
-   le chargement (décision #2 SPEC).
-   L'attribut bgzen-loading est posé/retiré par
+   le chargement. Attribut bgzen-loading posé par
    bg-zen.uc.js (STATE_START / STATE_STOP),
    reveal à 850ms (synchro MyLoadingBar).
    ============================================= */

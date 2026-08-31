@@ -1,0 +1,5 @@
+# Pools d'images perso — jamais commités (règle data vs code)
+backgrounds/*
+!backgrounds/default.png
+loadings/*
+!loadings/.gitkeep
