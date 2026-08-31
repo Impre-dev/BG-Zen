@@ -174,7 +174,36 @@
   font-style: italic;
   line-height: 1.35;
   max-width: min(70vw, 60rem);
-  white-space: normal;
+  /* pre-line : les \n du sanitize deviennent de vrais retours
+     (rendu versifié des citations multi-lignes de l'API) */
+  white-space: pre-line;
+}
+
+/* Poème long (> 180 chars) — police réduite pour ne pas déborder */
+#bgzen-boot-title span.long {
+  font-size: clamp(1.05rem, 1.8vw, 1.5rem);
+  line-height: 1.45;
+}
+
+/* Mode "press start" — hint pulsant façon écran titre de jeu.
+   Enfant de #bgzen-boot-title (hérite couleur/lueur, fade à la sortie)
+   mais positionné fixed en bas de la fenêtre. */
+#bgzen-boot-hint {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 7vh;
+  text-align: center;
+  font-size: clamp(0.95rem, 1.2vw, 1.2rem);
+  font-weight: 400;
+  font-style: normal;
+  letter-spacing: 0.08em;
+  animation: bgzen-hint-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes bgzen-hint-pulse {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 1; }
 }
 
 #bgzen-boot-title span:last-child {

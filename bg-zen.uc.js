@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           BG-Zen
-// @version        0.5.0
+// @version        0.6.0
 // @description    Wallpaper derrière l'UI de Zen — pools repos/loading, glass constant, splash
 // @author         Impre
 // @include        main
@@ -35,6 +35,11 @@
         bootQuote: true,   // citation aléatoire en phrase d'accueil (citation.lecog.fr, cache local)
         quoteUrl: 'https://citation.lecog.fr/public/api/random-quote.php',
         bootMinMs: 2500,   // durée MINIMALE du boot splash — l'anim a le temps de vivre
+        bootWaitSkipShort: false, // false → "press start" sur TOUTES les citations
+                           // (défaut, 31/08). true → seules les longues
+                           // (> bootWaitThreshold) attendent l'input.
+        bootWaitThreshold: 180, // seuil "longue" (chars) si bootWaitSkipShort
+                           // (game pur : attente input, aucun failsafe)
         debug: true,       // logs fichier (bgzen-debug.log) — false en prod
         imageExts: ['.png', '.jpg', '.jpeg', '.webp', '.avif', '.gif', '.jxl', '.svg'],
     };
@@ -242,14 +247,25 @@
             // réseau au boot — celle affichée a été prefetchée au boot
             // précédent). Pas de cache → texte CONFIG.bootTitle.
             const quote = CONFIG.bootQuote ? await this.loadQuote() : null;
-            const lines = quote
-                ? [quote.text, `— ${quote.author}`]
+            // Défensif : le cache peut contenir du HTML brut (leçon 31/08 —
+            // l'API renvoie des <br /> dans les textes versifiés).
+            const text = quote ? this.sanitizeText(quote.text) : null;
+            const lines = text
+                ? [text, `— ${quote.author}`]
                 : CONFIG.bootTitle;
+            // Mode "press start" (cf. enterWait) : le splash persiste
+            // jusqu'à un input utilisateur. bootWaitSkipShort = false →
+            // TOUTES les citations attendent (défaut) ; true → seulement
+            // les longues (> bootWaitThreshold).
+            const long = !!text && text.length > CONFIG.bootWaitThreshold;
+            this.waitMode = !!text && (long || !CONFIG.bootWaitSkipShort);
             const title = document.createElement('div');
             title.id = 'bgzen-boot-title';
-            for (const text of lines) {
+            for (const line of lines) {
                 const span = document.createElement('span');
-                span.textContent = text;
+                span.textContent = line;
+                // Poème long → police réduite pour ne pas déborder
+                if (line === text && long) span.classList.add('long');
                 title.appendChild(span);
             }
             mw.appendChild(title);
@@ -273,6 +289,25 @@
             return null;
         },
 
+        // L'API renvoie du HTML dans le texte (<br />, entités, indentation).
+        // Les <br /> deviennent de vrais sauts de ligne (rendu versifié via
+        // white-space: pre-line), le reste est nettoyé.
+        sanitizeText(raw) {
+            return raw
+                .replace(/<br\s*\/?>/gi, '\n')
+                .replace(/<[^>]+>/g, '')
+                .replace(/&nbsp;/gi, ' ')
+                .replace(/&/gi, '&')
+                .replace(/</gi, '<')
+                .replace(/>/gi, '>')
+                .replace(/"/gi, '"')
+                .replace(/&#0?39;/g, "'")
+                .replace(/[ \t]+/g, ' ')
+                .split('\n').map(l => l.trim()).filter(Boolean)
+                .join('\n')
+                .trim();
+        },
+
         // Pour le PROCHAIN boot : fetch lancé APRÈS le retrait du splash
         // (le réseau est plus lent que le boot — on ne l'attend jamais).
         // Event-chained, zéro polling, échec silencieux (cache conservé).
@@ -285,8 +320,9 @@
                     const author = [a.forename, a.name].filter(Boolean).join(' ');
                     // ⚠️ tmpPath doit être ABSOLU (un simple nom de fichier
                     // → NS_ERROR_FILE_UNRECOGNIZED_PATH, leçon 31/08).
+                    // On écrit déjà SANITIZÉ (le cache doit rester propre).
                     return IOUtils.writeJSON(QUOTE_FILE,
-                        { text: j.data.text, author },
+                        { text: this.sanitizeText(j.data.text), author },
                         { tmpPath: QUOTE_FILE + '.tmp' });
                 })
                 .then(() => dbg('cita préfetchée pour le prochain boot'))
@@ -343,6 +379,37 @@
             // bootMinMs, on laisse l'anim vivre avant de sortir. Si elle
             // est plus lente, hold = 0 → sortie immédiate au REVEAL.
             const hold = Math.max(0, CONFIG.bootMinMs - (Date.now() - this.installAt));
+            // Mode "press start" (game pur, validé 31/08) : citation longue
+            // → le splash persiste jusqu'à un input utilisateur. Aucun
+            // failsafe ici : l'input EST l'événement de sortie — même un
+            // STOP perdu ne peut plus bloquer (n'importe quelle touche ferme).
+            if (this.waitMode) {
+                setTimeout(() => this.enterWait(), hold);
+                dbg(`🕹️ BOOT waitMode — citation longue, attente input (${reason})`);
+                return;
+            }
+            this.exitNow(reason, hold);
+        },
+
+        // Écran titre de jeu : hint pulsant en bas + one-shot keydown ET
+        // mousedown — le premier input gagne, l'autre listener est retiré
+        // (pas de double-fire). Le pseudo est pointer-events:none → les
+        // clics traversent vers l'UI et bubblent quand même à window.
+        enterWait() {
+            const hint = document.createElement('div');
+            hint.id = 'bgzen-boot-hint';
+            hint.textContent = 'Pressez une touche pour continuer…';
+            this.titleEl?.appendChild(hint);
+            this.waitExit = () => {
+                window.removeEventListener('keydown', this.waitExit);
+                window.removeEventListener('mousedown', this.waitExit);
+                this.exitNow('input utilisateur', 0);
+            };
+            window.addEventListener('keydown', this.waitExit);
+            window.addEventListener('mousedown', this.waitExit);
+        },
+
+        exitNow(reason, hold = 0) {
             setTimeout(() => {
                 this.titleEl?.classList.add('bgzen-boot-out');
                 document.getElementById('main-window')?.setAttribute('bgzen-booted', '');
@@ -474,7 +541,7 @@
         const layers = createLayers();
         if (!layers) { log('ERREUR — #main-window introuvable'); return; }
 
-        dbg(`=== SESSION BG-Zen v0.5.0 — debug ${CONFIG.debug ? 'ACTIF' : 'off'} (fichier réinitialisé) ===`);
+        dbg(`=== SESSION BG-Zen v0.6.0 — debug ${CONFIG.debug ? 'ACTIF' : 'off'} (fichier réinitialisé) ===`);
         dbg(`CONFIG enter=${CONFIG.enterMs}ms exit=${CONFIG.exitMs}ms bar=${CONFIG.barTotalMs}ms grâce=${CONFIG.stabilizeMs}ms`);
 
         // Pré-tirage de la 1ère image de loading : invisible pendant le
@@ -489,7 +556,7 @@
         // en mode nav — attribut posé avant le 1er paint, aucun flash.
         if (BootSplash.isStartupWindow()) BootSplash.install();
         else document.getElementById('main-window')?.setAttribute('bgzen-booted', '');
-        log('init v0.5.0 — boot splash full-UI (frame 0 userChrome + citation) + grâce paint + switch cash + warm-up');
+        log('init v0.6.0 — boot splash full-UI + citation (sanitize HTML) + press start (attente input)');
     }
 
     if (document.readyState === 'complete' || document.readyState === 'interactive') init();
