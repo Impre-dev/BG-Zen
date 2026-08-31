@@ -185,19 +185,19 @@
   line-height: 1.45;
 }
 
-/* Mode "press start" — hint pulsant façon écran titre de jeu.
+/* "Press start" — hint pulsant façon écran titre de jeu.
    Enfant de #bgzen-boot-title (hérite couleur/lueur, fade à la sortie)
-   mais positionné fixed en bas de la fenêtre. */
+   mais positionné fixed en bas de la fenêtre. Même police que l'auteur
+   (le hint s'ajoute APRÈS les spans → jamais ciblé par leurs sélecteurs). */
 #bgzen-boot-hint {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: 7vh;
+  bottom: 4vh;
   text-align: center;
-  font-size: clamp(0.95rem, 1.2vw, 1.2rem);
+  font-size: clamp(1rem, 1.4vw, 1.4rem);
   font-weight: 400;
   font-style: normal;
-  letter-spacing: 0.08em;
   animation: bgzen-hint-pulse 1.6s ease-in-out infinite;
 }
 
@@ -206,7 +206,10 @@
   50%      { opacity: 1; }
 }
 
-#bgzen-boot-title span:last-child {
+/* ⚠️ nth-child(2) et PAS last-child : le hint du press start
+   s'ajoute après l'auteur — last-child cesserait de matcher
+   et l'auteur perdrait sa police (bug vu 31/08). */
+#bgzen-boot-title span:nth-child(2) {
   font-size: clamp(1rem, 1.4vw, 1.4rem);
   font-weight: 400;
   opacity: 0.85;

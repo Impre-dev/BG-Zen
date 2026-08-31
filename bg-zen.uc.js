@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           BG-Zen
-// @version        0.6.0
+// @version        0.6.1
 // @description    Wallpaper derrière l'UI de Zen — pools repos/loading, glass constant, splash
 // @author         Impre
 // @include        main
@@ -32,8 +32,7 @@
         bootFadeMs: 600,   // fade de sortie du boot splash (pseudo ::after CSS §6)
         bootTimeoutMs: 15000, // LAST RESORT : filet si aucun STOP ne survient jamais
         bootTitle: ['Welcome to', 'a calmer internet'], // fallback si pas de citation en cache
-        bootQuote: true,   // citation aléatoire en phrase d'accueil (citation.lecog.fr, cache local)
-        quoteUrl: 'https://citation.lecog.fr/public/api/random-quote.php',
+        bootQuote: true,   // citation aléatoire en phrase d'accueil (cache local)
         bootMinMs: 2500,   // durée MINIMALE du boot splash — l'anim a le temps de vivre
         bootWaitSkipShort: false, // false → "press start" sur TOUTES les citations
                            // (défaut, 31/08). true → seules les longues
@@ -48,6 +47,30 @@
     const BG_DIR = PathUtils.join(MOD_DIR, 'backgrounds');
     const LD_DIR = PathUtils.join(MOD_DIR, 'loadings');
     const QUOTE_FILE = PathUtils.join(MOD_DIR, 'boot', 'quote.json'); // cache runtime → gitignore
+    // Pool de sources citations — le prefetch tire une source au hasard
+    // à chaque boot. Chaque entrée normalise sa réponse en {text, author}.
+    const QUOTE_SOURCES = [
+        {
+            name: 'lecog',
+            url: 'https://citation.lecog.fr/public/api/random-quote.php',
+            parse(j) {
+                if (!j?.success || !j.data?.text) return null;
+                const a = j.data.author ?? {};
+                return { text: j.data.text, author: [a.forename, a.name].filter(Boolean).join(' ') };
+            },
+        },
+        {
+            name: 'kaamelott',
+            url: 'https://kaamelott.chaudie.re/api/random',
+            // Kaamelott : on affiche le PERSONNAGE (Caius Camillus),
+            // plus drôle que l'auteur — fallback auteur si absent.
+            parse(j) {
+                if (j?.status !== 1 || !j.citation?.citation) return null;
+                const i = j.citation.infos ?? {};
+                return { text: j.citation.citation, author: i.personnage || i.auteur || '' };
+            },
+        },
+    ];
     const REST_LAYER_ID = 'bgzen-layer';
     const LD_LAYER_ID = 'bgzen-loading-layer';
 
@@ -312,20 +335,20 @@
         // (le réseau est plus lent que le boot — on ne l'attend jamais).
         // Event-chained, zéro polling, échec silencieux (cache conservé).
         prefetchQuote() {
-            fetch(CONFIG.quoteUrl)
+            const src = QUOTE_SOURCES[Math.floor(Math.random() * QUOTE_SOURCES.length)];
+            fetch(src.url)
                 .then(r => r.json())
                 .then(j => {
-                    if (!j?.success || !j.data?.text) throw new Error('réponse invalide');
-                    const a = j.data.author ?? {};
-                    const author = [a.forename, a.name].filter(Boolean).join(' ');
+                    const q = src.parse(j);
+                    if (!q?.text) throw new Error('réponse invalide');
                     // ⚠️ tmpPath doit être ABSOLU (un simple nom de fichier
                     // → NS_ERROR_FILE_UNRECOGNIZED_PATH, leçon 31/08).
                     // On écrit déjà SANITIZÉ (le cache doit rester propre).
                     return IOUtils.writeJSON(QUOTE_FILE,
-                        { text: this.sanitizeText(j.data.text), author },
+                        { text: this.sanitizeText(q.text), author: q.author },
                         { tmpPath: QUOTE_FILE + '.tmp' });
                 })
-                .then(() => dbg('cita préfetchée pour le prochain boot'))
+                .then(() => dbg(`cita préfetchée (${src.name}) pour le prochain boot`))
                 .catch(ex => dbg('cita prefetch échec:', ex.message ?? String(ex)));
         },
 
@@ -541,7 +564,7 @@
         const layers = createLayers();
         if (!layers) { log('ERREUR — #main-window introuvable'); return; }
 
-        dbg(`=== SESSION BG-Zen v0.6.0 — debug ${CONFIG.debug ? 'ACTIF' : 'off'} (fichier réinitialisé) ===`);
+        dbg(`=== SESSION BG-Zen v0.6.1 — debug ${CONFIG.debug ? 'ACTIF' : 'off'} (fichier réinitialisé) ===`);
         dbg(`CONFIG enter=${CONFIG.enterMs}ms exit=${CONFIG.exitMs}ms bar=${CONFIG.barTotalMs}ms grâce=${CONFIG.stabilizeMs}ms`);
 
         // Pré-tirage de la 1ère image de loading : invisible pendant le
@@ -556,7 +579,7 @@
         // en mode nav — attribut posé avant le 1er paint, aucun flash.
         if (BootSplash.isStartupWindow()) BootSplash.install();
         else document.getElementById('main-window')?.setAttribute('bgzen-booted', '');
-        log('init v0.6.0 — boot splash full-UI + citation (sanitize HTML) + press start (attente input)');
+        log('init v0.6.1 — boot splash + citations multi-sources (lecog/kaamelott) + press start');
     }
 
     if (document.readyState === 'complete' || document.readyState === 'interactive') init();
