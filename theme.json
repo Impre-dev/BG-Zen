@@ -1,0 +1,18 @@
+{
+  "id": "BG-Zen",
+  "name": "BG-Zen",
+  "description": "Wallpaper derrière l'UI de Zen — couche dédiée (z-index:-1 dans #main-window), blur dynamique inversé (net pendant le chargement, flou au repos), splash de chargement synchronisé avec MyLoadingBar",
+  "author": "Impre",
+  "version": "0.1.0",
+  "js": true,
+  "scripts": {
+    "bg-zen.uc.js": {
+      "name": "BG-Zen Engine",
+      "description": "Couche wallpaper + blur dynamique + splash de chargement",
+      "include": ["chrome://browser/content/browser.xhtml"]
+    }
+  },
+  "style": { "chrome": "chrome.css" },
+  "tags": ["Javascript"],
+  "fork": ["zen"]
+}

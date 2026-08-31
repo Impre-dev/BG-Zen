@@ -1,0 +1,92 @@
+/* ============================================
+   BG-Zen — chrome.css
+   Feuille stylique du mod. La var --bgzen-image
+   (URL absolue file://) est posée par bg-zen.uc.js.
+   ⚠️ NE JAMAIS peindre d'image sur #main-window
+   (bug de transparence des pages — voir SPEC).
+   Prérequis : prefs Zen Mica + transparence UI ON,
+   Nebula (UI translucide) actif.
+   ============================================ */
+
+:root {
+  /* --- Glass sidebar (valeurs du fork) --- */
+  --bgzen-glass: light-dark(rgb(255 255 255 / 25%), rgb(0 0 0 / 40%));
+  --bgzen-glass-filter: blur(32px) saturate(140%);
+  --bgzen-glass-shadow: rgb(0 0 0 / 20%) 0 20px 40px;
+
+  /* --- Posées par bg-zen.uc.js (URL absolue + intensité) --- */
+  /* --bgzen-image: url("file:///...BG_Zen.png"); */
+  /* --bgzen-blur: 24px; */
+}
+
+/* =============================================
+   §0  STACKING — sans ceci, l'enfant z-index:-1
+   passe SOUS le fond de #main-window (invisible).
+   isolation:isolate le force en stacking context.
+   ============================================= */
+
+#main-window {
+  isolation: isolate;
+}
+
+/* =============================================
+   §1  COUCHE WALLPAPER — premier enfant de
+   #main-window, z-index: -1 (au-dessus du fond de
+   la fenêtre, sous toute l'UI). Créée par
+   bg-zen.uc.js. Blur au repos ; le listener
+   bascule filter blur(0px) ↔ blur(24px) inline.
+   ============================================= */
+
+#bgzen-layer {
+  position: fixed;
+  inset: -64px; /* marge de bleed pour le blur */
+  z-index: -1;
+  pointer-events: none;
+  background-image: var(--bgzen-image);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  filter: blur(var(--bgzen-blur, 24px)); /* idée #5 : flou au repos */
+  transition: filter 500ms ease;
+}
+
+/* =============================================
+   §3  SIDEBAR GLASS — au hover du toolbox
+   Technique : background-attachment: fixed ancre
+   l'image au VIEWPORT → même scène alignée que
+   la couche, continuation pixel-perfect.
+   ============================================= */
+
+#browser:has(#navigator-toolbox[zen-has-hover='true']) #titlebar {
+  background-image: var(--bgzen-image) !important;
+  background-size: cover !important;
+  background-position: center !important;
+  background-repeat: no-repeat !important;
+  background-attachment: fixed !important;
+
+  /* Glass façon fork : givre ce qui est derrière (contenu web + couche wallpaper).
+     NB : backdrop-filter ne floute PAS le background de l'élément lui-même —
+     l'image alignée reste nette, le tint glass la teinte. */
+  backdrop-filter: var(--bgzen-glass-filter) !important;
+  box-shadow: var(--bgzen-glass-shadow) !important;
+  border-radius: 6px !important;
+}
+
+/* =============================================
+   §5  SPLASH — masquage total du wrapper pendant
+   le chargement (décision #2 SPEC).
+   L'attribut bgzen-loading est posé/retiré par
+   bg-zen.uc.js (STATE_START / STATE_STOP),
+   reveal à 850ms (synchro MyLoadingBar).
+   ============================================= */
+
+#tabbrowser-tabpanels .browserSidebarContainer[bgzen-loading] {
+  visibility: hidden !important;
+}
+
+/* La loading bar de MyLoadingBar vit dans ce conteneur (appendChild) —
+   on la ré-affiche : visibility est héritée mais surchargeable par
+   descendant, où que la barre vive dans le sous-arbre masqué. */
+#tabbrowser-tabpanels [bgzen-loading] #uc-loadingbar {
+  visibility: visible !important;
+}
