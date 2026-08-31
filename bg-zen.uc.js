@@ -283,9 +283,11 @@
                     if (!j?.success || !j.data?.text) throw new Error('réponse invalide');
                     const a = j.data.author ?? {};
                     const author = [a.forename, a.name].filter(Boolean).join(' ');
+                    // ⚠️ tmpPath doit être ABSOLU (un simple nom de fichier
+                    // → NS_ERROR_FILE_UNRECOGNIZED_PATH, leçon 31/08).
                     return IOUtils.writeJSON(QUOTE_FILE,
                         { text: j.data.text, author },
-                        { tmpPath: 'bgzen-quote-tmp.json' });
+                        { tmpPath: QUOTE_FILE + '.tmp' });
                 })
                 .then(() => dbg('cita préfetchée pour le prochain boot'))
                 .catch(ex => dbg('cita prefetch échec:', ex.message ?? String(ex)));
