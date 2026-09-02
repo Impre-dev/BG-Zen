@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           BG-Zen
-// @version        0.6.1
+// @version        0.6.2
 // @description    Wallpaper derrière l'UI de Zen — pools repos/loading, glass constant, splash
 // @author         Impre
 // @include        main
@@ -30,6 +30,10 @@
                            // a le temps d'être affiché avant le reveal
         stabilizeMs: 2000, // pas de re-tirage loading si reveal < 2s (anti double-image)
         bootFadeMs: 600,   // fade de sortie du boot splash (pseudo ::after CSS §6)
+        bootRevealCdMs: 0, // TEST 02/09 : cd du reveal AU BOOT en press start.
+                           // Le reveal se joue derrière le splash full-UI
+                           // (invisible) → 0 = hint cash au 1er STOP.
+                           // barTotalMs reste intact pour les navs normales.
         bootTimeoutMs: 15000, // LAST RESORT : filet si aucun STOP ne survient jamais
         bootTitle: ['Welcome to', 'a calmer internet'], // fallback si pas de citation en cache
         bootQuote: true,   // citation aléatoire en phrase d'accueil (cache local)
@@ -401,14 +405,17 @@
             // Durée minimale : si la homepage charge plus vite que
             // bootMinMs, on laisse l'anim vivre avant de sortir. Si elle
             // est plus lente, hold = 0 → sortie immédiate au REVEAL.
+            // Le hold bootMinMs ne protège que les sorties AUTO (le temps
+            // de lire le titre) — inutile en press start, où c'est l'input
+            // qui décide.
             const hold = Math.max(0, CONFIG.bootMinMs - (Date.now() - this.installAt));
-            // Mode "press start" (game pur, validé 31/08) : citation longue
-            // → le splash persiste jusqu'à un input utilisateur. Aucun
-            // failsafe ici : l'input EST l'événement de sortie — même un
-            // STOP perdu ne peut plus bloquer (n'importe quelle touche ferme).
+            // Mode "press start" (game pur, validé 31/08) : le splash
+            // persiste jusqu'à un input utilisateur. Aucun failsafe ici :
+            // l'input EST l'événement de sortie — même un STOP perdu ne
+            // peut plus bloquer (n'importe quelle touche ferme).
             if (this.waitMode) {
-                setTimeout(() => this.enterWait(), hold);
-                dbg(`🕹️ BOOT waitMode — citation longue, attente input (${reason})`);
+                this.enterWait(); // idempotent — déjà armé si 1er STOP précoce
+                dbg(`🕹️ BOOT waitMode — attente input (${reason})`);
                 return;
             }
             this.exitNow(reason, hold);
@@ -419,6 +426,8 @@
         // (pas de double-fire). Le pseudo est pointer-events:none → les
         // clics traversent vers l'UI et bubblent quand même à window.
         enterWait() {
+            if (this.waitArmed) return;
+            this.waitArmed = true;
             const hint = document.createElement('div');
             hint.id = 'bgzen-boot-hint';
             hint.textContent = 'Pressez une touche pour continuer…';
@@ -521,6 +530,12 @@
 
                 if (stateFlags & WPL.STATE_STOP) {
                     clearTimeout(unmaskTimer);
+                    // Au boot en press start : le reveal se joue DERRIÈRE le
+                    // splash full-UI (invisible) → cd boot dédié (test 0),
+                    // barTotalMs intact pour les navigations normales.
+                    const cd = (BootSplash.waitMode && !BootSplash.done)
+                        ? CONFIG.bootRevealCdMs
+                        : CONFIG.barTotalMs;
                     unmaskTimer = setTimeout(() => {
                         loadingLayer.removeAttribute('bgzen-active'); // fade + blur sortant
                         container?.toggleAttribute('bgzen-loading', false); // reveal
@@ -530,8 +545,8 @@
                         // Pré-tirage de la prochaine image — ne touche pas la
                         // var (fade de sortie intact), event-chained, zéro timer.
                         Resolver.prefetchLoading();
-                    }, CONFIG.barTotalMs);
-                    dbg(`${ts}    └ reveal programmé dans ${CONFIG.barTotalMs}ms`);
+                    }, cd);
+                    dbg(`${ts}    └ reveal programmé dans ${cd}ms`);
                 }
               } catch (ex) {
                 dbg(`‼️ EXCEPTION onStateChange: ${ex.message}`);
@@ -564,7 +579,7 @@
         const layers = createLayers();
         if (!layers) { log('ERREUR — #main-window introuvable'); return; }
 
-        dbg(`=== SESSION BG-Zen v0.6.1 — debug ${CONFIG.debug ? 'ACTIF' : 'off'} (fichier réinitialisé) ===`);
+        dbg(`=== SESSION BG-Zen v0.6.2 — debug ${CONFIG.debug ? 'ACTIF' : 'off'} (fichier réinitialisé) ===`);
         dbg(`CONFIG enter=${CONFIG.enterMs}ms exit=${CONFIG.exitMs}ms bar=${CONFIG.barTotalMs}ms grâce=${CONFIG.stabilizeMs}ms`);
 
         // Pré-tirage de la 1ère image de loading : invisible pendant le
@@ -579,7 +594,7 @@
         // en mode nav — attribut posé avant le 1er paint, aucun flash.
         if (BootSplash.isStartupWindow()) BootSplash.install();
         else document.getElementById('main-window')?.setAttribute('bgzen-booted', '');
-        log('init v0.6.1 — boot splash + citations multi-sources (lecog/kaamelott) + press start');
+        log('init v0.6.2 — press start réactif : hint cash au 1er STOP (bootRevealCdMs=0, barTotalMs intact)');
     }
 
     if (document.readyState === 'complete' || document.readyState === 'interactive') init();
