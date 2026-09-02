@@ -35,8 +35,14 @@
                            // (invisible) → 0 = hint cash au 1er STOP.
                            // barTotalMs reste intact pour les navs normales.
         bootTimeoutMs: 15000, // LAST RESORT : filet si aucun STOP ne survient jamais
-        bootTitle: ['Welcome to', 'a calmer internet'], // fallback si pas de citation en cache
-        bootQuote: true,   // citation aléatoire en phrase d'accueil (cache local)
+        bootTitle: ['Welcome to', 'a calmer internet'], // fallback si corpus absent/illisible
+        bootQuote: true,   // citation aléatoire en phrase d'accueil (corpus local Wikiquote)
+        quoteExcludeThemes: [
+            'religion', 'croyance', 'spiritualite', 'theolog', 'christianis',
+            'judaisme', 'islam',                 // famille Religion
+            'econom', 'financ', 'entreprise',    // famille Économie
+            'politi', 'travail', 'droit',        // politique / travail / droit (02/09)
+        ], // racines normalisées matchées sur les thèmes (c/C) du corpus — live au restart
         bootMinMs: 2500,   // durée MINIMALE du boot splash — l'anim a le temps de vivre
         bootWaitSkipShort: false, // false → "press start" sur TOUTES les citations
                            // (défaut, 31/08). true → seules les longues
@@ -50,31 +56,8 @@
     const MOD_DIR = PathUtils.join(PathUtils.profileDir, 'chrome', 'sine-mods', 'BG-Zen');
     const BG_DIR = PathUtils.join(MOD_DIR, 'backgrounds');
     const LD_DIR = PathUtils.join(MOD_DIR, 'loadings');
-    const QUOTE_FILE = PathUtils.join(MOD_DIR, 'boot', 'quote.json'); // cache runtime → gitignore
-    // Pool de sources citations — le prefetch tire une source au hasard
-    // à chaque boot. Chaque entrée normalise sa réponse en {text, author}.
-    const QUOTE_SOURCES = [
-        {
-            name: 'lecog',
-            url: 'https://citation.lecog.fr/public/api/random-quote.php',
-            parse(j) {
-                if (!j?.success || !j.data?.text) return null;
-                const a = j.data.author ?? {};
-                return { text: j.data.text, author: [a.forename, a.name].filter(Boolean).join(' ') };
-            },
-        },
-        {
-            name: 'kaamelott',
-            url: 'https://kaamelott.chaudie.re/api/random',
-            // Kaamelott : on affiche le PERSONNAGE (Caius Camillus),
-            // plus drôle que l'auteur — fallback auteur si absent.
-            parse(j) {
-                if (j?.status !== 1 || !j.citation?.citation) return null;
-                const i = j.citation.infos ?? {};
-                return { text: j.citation.citation, author: i.personnage || i.auteur || '' };
-            },
-        },
-    ];
+    const CORPUS_FILE = PathUtils.join(MOD_DIR, 'corpus.json'); // corpus Wikiquote commité (2972 citations, méta thèmes c/C)
+    const QUOTE_HIST_FILE = PathUtils.join(MOD_DIR, 'boot', 'quote-history.json'); // 10 derniers auteurs → gitignore
     const REST_LAYER_ID = 'bgzen-layer';
     const LD_LAYER_ID = 'bgzen-loading-layer';
 
@@ -101,6 +84,12 @@
         try {
             writeLog(`${new Date().toISOString()} ${args.join(' ')}`);
         } catch { /* le logging ne doit JAMAIS casser l'appelant */ }
+    }
+
+    // Normalisation thèmes : NFD sans diacritiques + lowercase.
+    // 'Vocabulaire religieux' → 'vocabulaire religieux' (matchable par 'relig').
+    function normTheme(s) {
+        return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
     }
 
     // ⚠️ request.name (nsIRequest) lève NOT_IMPLEMENTED quasi systématiquement
@@ -270,9 +259,10 @@
         async install() {
             const mw = document.getElementById('main-window');
             this.installAt = Date.now();
-            // Phrase d'accueil : citation CACHÉE LOCALEMENT (jamais de
-            // réseau au boot — celle affichée a été prefetchée au boot
-            // précédent). Pas de cache → texte CONFIG.bootTitle.
+            // Phrase d'accueil : citation PIOCHÉE LOCALEMENT dans le corpus
+            // Wikiquote (02/09 — zéro réseau au boot, filtrage thématique
+            // + anti-repeat auteurs, cf. loadQuote). Corpus absent →
+            // texte CONFIG.bootTitle.
             const quote = CONFIG.bootQuote ? await this.loadQuote() : null;
             // Défensif : le cache peut contenir du HTML brut (leçon 31/08 —
             // l'API renvoie des <br /> dans les textes versifiés).
@@ -308,12 +298,43 @@
                 : '▶️ BOOT splash installé (texte défaut — pas de citation en cache)');
         },
 
+        // Pick LOCAL instantané dans le corpus Wikiquote — AUCUN réseau au
+        // boot (02/09 : fin du pipeline lecog/prefetch). Filtrage thématique
+        // runtime : racines de CONFIG.quoteExcludeThemes matchées sur les
+        // feuilles `c` + macro-ancêtres `C` de chaque citation. Puis
+        // anti-repeat : on évite les 10 derniers auteurs affichés
+        // (boot/quote-history.json) — la boucle Pascal/Blake devient
+        // structurellement impossible.
         async loadQuote() {
             try {
-                const q = await IOUtils.readJSON(QUOTE_FILE);
-                if (q?.text) return q;
-            } catch { /* pas de cache au 1er boot */ }
-            return null;
+                const data = await IOUtils.readJSON(CORPUS_FILE);
+                const quotes = data?.quotes;
+                if (!Array.isArray(quotes) || !quotes.length) return null;
+                const banned = CONFIG.quoteExcludeThemes.map(normTheme);
+                const ok = q => {
+                    const hay = normTheme([...(q.c || []), ...(q.C || [])].join(' '));
+                    return !banned.some(b => hay.includes(b));
+                };
+                let pool = quotes.filter(ok);
+                if (!pool.length) pool = quotes; // blocklist trop large → corpus entier
+                let hist = [];
+                try { hist = await IOUtils.readJSON(QUOTE_HIST_FILE) ?? []; }
+                catch { /* 1er boot */ }
+                let pick, tries = 0;
+                do {
+                    pick = pool[Math.floor(Math.random() * pool.length)];
+                } while (hist.includes(normTheme(pick.a)) && ++tries < 20);
+                hist.push(normTheme(pick.a));
+                // ⚠️ tmpPath ABSOLU requis (leçon 31/08). Échec silencieux :
+                // l'anti-repeat est du bonus, pas une dépendance.
+                IOUtils.writeJSON(QUOTE_HIST_FILE, hist.slice(-10),
+                    { tmpPath: QUOTE_HIST_FILE + '.tmp' }).catch(() => {});
+                dbg(`cita locale — ${pick.a} (pool ${pool.length}/${quotes.length})`);
+                return { text: pick.t, author: pick.a };
+            } catch (ex) {
+                dbg('corpus illisible:', ex.message ?? String(ex));
+                return null;
+            }
         },
 
         // L'API renvoie du HTML dans le texte (<br />, entités, indentation).
@@ -333,27 +354,6 @@
                 .split('\n').map(l => l.trim()).filter(Boolean)
                 .join('\n')
                 .trim();
-        },
-
-        // Pour le PROCHAIN boot : fetch lancé APRÈS le retrait du splash
-        // (le réseau est plus lent que le boot — on ne l'attend jamais).
-        // Event-chained, zéro polling, échec silencieux (cache conservé).
-        prefetchQuote() {
-            const src = QUOTE_SOURCES[Math.floor(Math.random() * QUOTE_SOURCES.length)];
-            fetch(src.url)
-                .then(r => r.json())
-                .then(j => {
-                    const q = src.parse(j);
-                    if (!q?.text) throw new Error('réponse invalide');
-                    // ⚠️ tmpPath doit être ABSOLU (un simple nom de fichier
-                    // → NS_ERROR_FILE_UNRECOGNIZED_PATH, leçon 31/08).
-                    // On écrit déjà SANITIZÉ (le cache doit rester propre).
-                    return IOUtils.writeJSON(QUOTE_FILE,
-                        { text: this.sanitizeText(q.text), author: q.author },
-                        { tmpPath: QUOTE_FILE + '.tmp' });
-                })
-                .then(() => dbg(`cita préfetchée (${src.name}) pour le prochain boot`))
-                .catch(ex => dbg('cita prefetch échec:', ex.message ?? String(ex)));
         },
 
         // Anim d'entrée façon ZenWelcome.animateInitialStage : spring
@@ -448,7 +448,6 @@
                 setTimeout(() => this.titleEl?.remove(), CONFIG.bootFadeMs + 100);
             }, hold);
             dbg(`🏁 BOOT splash — sortie dans ${hold}ms (${reason})`);
-            this.prefetchQuote(); // citation du PROCHAIN boot — réseau post-splash
         },
     };
 
