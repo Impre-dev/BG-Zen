@@ -58,6 +58,7 @@
     bootWaitThreshold: 180, // seuil "longue" (chars) si bootWaitSkipShort
     // (game pur : attente input, aucun failsafe)
     debug: true, // logs fichier (bgzen-debug.log) — false en prod
+    debugVerbose: false, // bruit (non-top-level, geometry, skips) — true pour auditer à fond
     imageExts: ['.png', '.jpg', '.jpeg', '.webp', '.avif', '.gif', '.jxl', '.svg'],
   };
 
@@ -75,27 +76,47 @@
 
   /* ---------- Log debug fichier ---------- */
   // Tout l'enchaînement chargement atterrit dans bgzen-debug.log
-  // (réinitialisé à chaque session). ⚠️ data runtime → gitignoré.
+  // (cap ~200 Ko glissante). ⚠️ data runtime → gitignoré.
   // Écritures sérialisées (chaîne de promesses) + dbg blindé :
   // le logging ne peut JAMAIS casser l'appelant.
   const LOG_FILE = PathUtils.join(MOD_DIR, 'bgzen-debug.log');
-  const logLines = [];
+  const WTAG = 'w' + Math.random().toString(36).slice(2, 5); // tag fenêtre — démêle le multi-fenêtres
   let writeChain = Promise.resolve();
 
+  // ⚠️ Ce build Zen TRONQUE avec IOUtils.writeUTF8(…, { append: true })
+  // (prouvé en console : 2 appends successifs → fichier = dernière ligne seule).
+  // → read-append-write sérialisé sur writeChain (zéro race inter-écritures),
+  //   cap glissante ~200 Ko intégrée (coupe propre au \n) — plus de rotation.
+  async function appendLine(line) {
+    let prev = '';
+    try { prev = await IOUtils.readUTF8(LOG_FILE); } catch { /* 1er boot : fichier absent */ }
+    if (prev.length > 200 * 1024) {
+      const cut = prev.indexOf('\n', prev.length - 200 * 1024);
+      prev = (cut >= 0 ? prev.slice(cut + 1) : prev.slice(-200 * 1024));
+    }
+    await IOUtils.writeUTF8(LOG_FILE, prev + line + '\n');
+  }
+
   function writeLog(line) {
-    logLines.push(line);
     writeChain = writeChain
-      .then(() => IOUtils.writeUTF8(LOG_FILE, logLines.join('\n') + '\n'))
+      .then(() => appendLine(line))
       .catch((ex) => console.error('[BG-Zen] écriture log impossible:', ex.message));
   }
 
+  // Format unique : [fenêtre] HH:MM:SS.mmm — une seule horloge, zéro doublon.
   function dbg(...args) {
     if (!CONFIG.debug) return;
     try {
-      writeLog(`${new Date().toISOString()} ${args.join(' ')}`);
+      writeLog(`[${WTAG}] ${new Date().toISOString().slice(11, 23)} ${args.join(' ')}`);
     } catch {
       /* le logging ne doit JAMAIS casser l'appelant */
     }
+  }
+
+  // Bruit (non-top-level, geometry, etc.) — visible seulement en verbose.
+  function dbgV(...args) {
+    if (!CONFIG.debugVerbose) return;
+    dbg('·', ...args);
   }
 
   // Normalisation thèmes : NFD sans diacritiques + lowercase.
@@ -158,7 +179,7 @@
 
     async resolveRest(domain) {
       if (domain === this.currentDomain) {
-        dbg('resolveRest SKIP — même domaine:', domain || '(vide)');
+        dbgV('resolveRest SKIP — même domaine:', domain || '(vide)');
         return; // zéro flash intra-site
       }
       const file = this.pick(await this.listImages(BG_DIR), this.lastRest);
@@ -170,6 +191,14 @@
       this.currentDomain = domain;
       this.lastRest = file;
       this.setVar('--bgzen-image', file);
+      // Warm-up décodage : l'image repos doit être prête AVANT le fade
+      // de sortie du splash (tirage au STOP, révélé 1000ms plus tard).
+      // Sans ça, un bitmap non décodé peint VIDE pendant le crossfade.
+      try {
+        const img = new Image();
+        img.src = PathUtils.toFileURI(file);
+        img.decode().catch(() => {});
+      } catch { /* warm-up best effort */ }
       Sidebar.geometry(); // crop de la copie sidebar (§3) suit le tirage
     },
 
@@ -278,7 +307,7 @@
       this.lastFile = file;
       this.lastW = W;
       this.lastH = H;
-      dbg(`sidebar geometry ${w}x${h} (cover box bleed ${W + 2 * B}x${H + 2 * B})`);
+      dbgV(`sidebar geometry ${w}x${h} (cover box bleed ${W + 2 * B}x${H + 2 * B})`);
     },
   };
 
@@ -545,9 +574,40 @@
     }
   }
 
+  // Activation de session partagée (START de nav + TabSelect d'une tab
+  // fraîche). Posée par setupProgress — closure sur loadingLayer/état.
+  let startSession = null;
+
   function setupProgress(loadingLayer) {
     let unmaskTimer = null; // LAST RESORT: reveal différé = synchro barre (barTotalMs)
     let lastRevealAt = 0; // anti double-image : pas de re-tirage juste après un reveal
+
+    // ⚠️ Fix flash v3 (05/09) : appelée AUSSI depuis TabSelect. Sélection
+    // d'une tab fraîche → la page quittée (ex: CustomTab OPAQUE) laisse
+    // place à un onglet vide TRANSPARENT → le repos flashait ~30ms avant
+    // le START. On couvre à l'event même, l'image CASH est déjà décodée.
+    // Garde incluse (splash actif → rien) : le START qui suit l'ouverture
+    // d'onglet est absorbé sans re-tirage. Le tirage repos reste au STOP (v2).
+    startSession = (origin) => {
+      if (loadingLayer.hasAttribute('bgzen-active')) return false;
+      clearTimeout(unmaskTimer); // reveal différé annulé : nouvelle session
+      const sinceReveal = Date.now() - lastRevealAt;
+      const fresh = sinceReveal > CONFIG.stabilizeMs;
+      const detail = lastRevealAt === 0 ? 'première session' : `reveal il y a ${Math.round(sinceReveal)}ms`;
+      dbg(`🎬 SESSION ${origin} — ${fresh ? `tirage (${detail})` : `grâce <${CONFIG.stabilizeMs}ms, même image`}`);
+      const container = document.querySelector('.browserSidebarContainer.deck-selected');
+      const activate = (msg) => {
+        loadingLayer.setAttribute('bgzen-active', '');
+        dbg(`   ${msg}`);
+        container?.toggleAttribute('bgzen-loading', true); // wrapper masqué (§5)
+      };
+      if (Resolver.applyLoading(fresh)) {
+        activate(`▶️ SPLASH ACTIF CASH (opaque 0s + de-blur ${CONFIG.enterMs}ms)`);
+      } else {
+        Resolver.resolveLoading().then(() => activate('▶️ SPLASH ACTIF (cash manqué → fade + de-blur)'));
+      }
+      return true;
+    };
 
     const listener = {
       onStateChange(browser, webProgress, request, stateFlags, status) {
@@ -555,62 +615,43 @@
           // NOTE : pas de filtre STATE_IS_NETWORK — dans ce build les
           // events top-level n'ont pas ce flag (testé : ça tuait le splash).
           if (!webProgress?.isTopLevel) {
-            dbg(`⤵️  non top-level — ignoré ${safeUrl(request, browser)}`);
+            dbgV(`non top-level — ignoré ${safeUrl(request, browser)}`);
             return;
           }
           if (browser !== gBrowser.selectedBrowser) {
-            dbg(`⤵️  tab non sélectionné — ignoré ${safeUrl(request, browser)}`);
+            dbgV(`tab non sélectionné — ignoré ${safeUrl(request, browser)}`);
             return;
           }
 
           const WPL = Ci.nsIWebProgressListener;
-          const flags = [];
-          if (stateFlags & WPL.STATE_START) flags.push('START');
-          if (stateFlags & WPL.STATE_STOP) flags.push('STOP');
-          if (stateFlags & WPL.STATE_IS_NETWORK) flags.push('NETWORK');
-          if (stateFlags & WPL.STATE_IS_DOCUMENT) flags.push('DOC');
-          if (stateFlags & WPL.STATE_IS_REQUEST) flags.push('REQ');
-          const ts = new Date().toISOString().slice(11, 23);
+          const kind = stateFlags & WPL.STATE_START ? 'START' : 'STOP';
           const url = safeUrl(request, browser);
 
-          dbg(`${ts} 🌐 [${flags.join('|')}] ${url}`);
+          // Ligne d'ancrage : une seule par event top-level. Le cycle
+          // complet se lit verticalement : 🌐 START → 🎬 SESSION → 🌐 STOP
+          // → TIRAGE repos → ✅ REVEAL → prefetch.
+          dbg(`🌐 ${kind} ${url}`);
           const container = document.querySelector('.browserSidebarContainer.deck-selected');
 
           if (stateFlags & WPL.STATE_START) {
             clearTimeout(unmaskTimer);
-            dbg(`${ts}    └ reveal timer ANNULÉ (START)`);
+            dbgV('reveal timer ANNULÉ (START)');
 
-            // Garde de session : si le splash est déjà actif (redirect
-            // example.com → customtab, reload), on ne touche à RIEN —
-            // pas de re-tirage, pas de re-entrée → zéro flash, zéro 2e image.
-            if (loadingLayer.hasAttribute('bgzen-active')) {
-              dbg(`${ts}    └ SESSION EN COURS — START ignoré (splash déjà actif)`);
-            } else {
-              const sinceReveal = Date.now() - lastRevealAt;
-              const fresh = sinceReveal > CONFIG.stabilizeMs;
-              const detail = lastRevealAt === 0 ? 'première session' : `reveal il y a ${Math.round(sinceReveal)}ms`;
-              dbg(`${ts}    └ NOUVELLE SESSION — ${fresh ? `tirage (${detail})` : `grâce < ${CONFIG.stabilizeMs}ms — même image`}`);
-              // Switch CASH : image pré-tirée → var posée + couche
-              // OPAQUE en frame 0 (le repos n'est jamais visible),
-              // seul le de-blur anime. Cash manqué (1er nav, race)
-              // → fallback async avec fade, jamais d'image parasite.
-              if (Resolver.applyLoading(fresh)) {
-                loadingLayer.setAttribute('bgzen-active', '');
-                dbg(`${ts}    └ ▶️ SPLASH ACTIF CASH (opaque 0s + de-blur ${CONFIG.enterMs}ms)`);
-                container?.toggleAttribute('bgzen-loading', true); // wrapper masqué (§5)
-              } else {
-                Resolver.resolveLoading().then(() => {
-                  loadingLayer.setAttribute('bgzen-active', '');
-                  dbg(`${ts}    └ ▶️ SPLASH ACTIF (cash manqué → fade + de-blur)`);
-                  container?.toggleAttribute('bgzen-loading', true);
-                });
-              }
-            }
-            Resolver.resolveRest(getDomain(browser)); // re-tirage repos si domaine change
+            // Garde de session + activation via startSession (partagé avec
+            // TabSelect). Splash déjà actif (redirect, reload, tab fraîche
+            // déjà couverte) → on ne touche à RIEN : zéro flash, zéro 2e image.
+            // Pas de tirage repos ici (v2) : le STOP de session tire, couvert.
+            if (!startSession?.('START')) dbg('↳ START ignoré — session en cours (splash actif)');
           }
 
           if (stateFlags & WPL.STATE_STOP) {
             clearTimeout(unmaskTimer);
+            // ⚠️ Fix flash 04/09 v2 : tirage repos ICI — le splash est
+            // encore actif (reveal à 1000ms), la couche couvre tout.
+            // Le nouveau fonds se pose dessous + warm-up décodage, et le
+            // fade de sortie du reveal le révèle en crossfade natif.
+            // Zéro fenêtre de paint parasite possible.
+            Resolver.resolveRest(getDomain(browser));
             // Au boot en press start : le reveal se joue DERRIÈRE le
             // splash full-UI (invisible) → cd boot dédié (test 0),
             // barTotalMs intact pour les navigations normales.
@@ -625,7 +666,7 @@
               // var (fade de sortie intact), event-chained, zéro timer.
               Resolver.prefetchLoading();
             }, cd);
-            dbg(`${ts}    └ reveal programmé dans ${cd}ms`);
+            dbg(`   reveal dans ${cd}ms`);
           }
         } catch (ex) {
           dbg(`‼️ EXCEPTION onStateChange: ${ex.message}`);
@@ -644,7 +685,20 @@
 
   function setupTabSelect() {
     gBrowser.tabContainer.addEventListener('TabSelect', () => {
-      Resolver.resolveRest(getDomain(gBrowser.selectedBrowser));
+      const b = gBrowser.selectedBrowser;
+      // ⚠️ Fix flash v1→v3 : tab fraîche (about:blank, nav imminente) →
+      // JAMAIS de tirage nu ici (v1). Mais ne pas attendre le START non
+      // plus (v3) : l'onglet vide est TRANSPARENT, la page quittée peut
+      // être opaque (CustomTab) → le repos flashait pendant les ~30ms
+      // TabSelect→START. On active le splash immédiatement à l'event ;
+      // le START suivant est absorbé par la garde de session.
+      if (!b || b.webProgress?.isLoadingDocument || getDomain(b) === '') {
+        if (BootSplash.waitMode && !BootSplash.done) return; // boot splash couvre déjà tout
+        if (!startSession?.('TabSelect')) dbg('🖱️ TabSelect fraîche — session déjà en cours');
+        return;
+      }
+      // Tab chargée : changement de site à l'écran → tirage live voulu.
+      Resolver.resolveRest(getDomain(b));
     });
   }
 
@@ -664,8 +718,8 @@
       return;
     }
 
-    dbg(`=== SESSION BG-Zen v0.6.2 — debug ${CONFIG.debug ? 'ACTIF' : 'off'} (fichier réinitialisé) ===`);
-    dbg(`CONFIG enter=${CONFIG.enterMs}ms exit=${CONFIG.exitMs}ms bar=${CONFIG.barTotalMs}ms grâce=${CONFIG.stabilizeMs}ms`);
+    dbg(`══════ BG-Zen v0.7.1 — fenêtre ${WTAG} — debug ${CONFIG.debug ? 'ACTIF' : 'off'} ══════`);
+    dbg(`CONFIG enter=${CONFIG.enterMs}ms exit=${CONFIG.exitMs}ms bar=${CONFIG.barTotalMs}ms grâce=${CONFIG.stabilizeMs}ms verbose=${CONFIG.debugVerbose}`);
 
     // Pré-tirage de la 1ère image de loading : invisible pendant le
     // boot (le pan boot.jpg couvre tout), mais CASH pour la 1ère
