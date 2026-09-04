@@ -163,34 +163,32 @@
       }
     },
 
-    // Playlists shuffle (Fisher-Yates) : chaque image du pool sort UNE
-    // fois par passe ; queue épuisée → reshuffle (dossier relu : les
-    // ajouts/retraits sont pris en compte à chaque passe). Anti-répé-
-    // tition aux jointures : la 1re de la nouvelle passe ≠ dernière
-    // jouée de l'ancienne. Fini le random uniforme et ses retours en
-    // boucle (le "5x la même image d'affilée").
-    queues: new Map(), // dir → { queue: [], last: null }
+    // Roulement séquentiel : images lues dans l'ordre alphabétique du
+    // dossier, les unes après les autres, boucle au début du tour.
+    // Déterministe — « ça change à chaque fois » dès que le pool > 1,
+    // fini l'aléa et ses retours en boucle. Dossier relu à chaque tour
+    // complet (ajouts/retraits pris en compte).
+    cursors: new Map(), // dir → { idx: 0, last: null }
 
-    async drawFrom(dir, label) {
-      const files = await this.listImages(dir);
+    async nextFrom(dir, label) {
+      const files = (await this.listImages(dir)).sort((a, b) => a.localeCompare(b));
       if (!files.length) return null;
-      let st = this.queues.get(dir);
-      if (!st) this.queues.set(dir, (st = { queue: [], last: null }));
-      if (!st.queue.length) {
-        st.queue = files.slice();
-        for (let i = st.queue.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [st.queue[i], st.queue[j]] = [st.queue[j], st.queue[i]];
-        }
-        if (st.queue.length > 1 && st.queue[st.queue.length - 1] === st.last) {
-          [st.queue[0], st.queue[st.queue.length - 1]] = [st.queue[st.queue.length - 1], st.queue[0]];
-        }
-        dbg(`🔀 shuffle ${label} — passe de ${st.queue.length} images`);
+      let st = this.cursors.get(dir);
+      if (!st) this.cursors.set(dir, (st = { idx: 0, last: null }));
+      if (st.idx >= files.length) {
+        st.idx = 0;
+        dbg(`🔁 roulement ${label} — tour complet (${files.length} images), dossier relu`);
       }
-      const file = st.queue.pop();
-      // Image retirée du dossier en cours de passe → sautée (setVar sur
-      // un fichier absent peindrait vide).
-      if (!(await IOUtils.exists(file))) return this.drawFrom(dir, label);
+      // Fichier retiré du dossier en cours de tour → sauté (setVar sur
+      // un fichier absent peindrait vide). Anti-répétition : si le
+      // candidat === dernière jouée (jointure de tour), cran suivant.
+      while (
+        st.idx < files.length &&
+        ((files.length > 1 && files[st.idx] === st.last) || !(await IOUtils.exists(files[st.idx])))
+      ) st.idx++;
+      if (st.idx >= files.length) return null; // tout sauté (course avec suppression)
+      const file = files[st.idx];
+      st.idx = st.idx + 1; // peut dépasser → wrap + relecture du dossier au prochain appel
       st.last = file;
       return file;
     },
@@ -204,7 +202,7 @@
         dbgV('resolveRest SKIP — même domaine:', domain || '(vide)');
         return; // zéro flash intra-site
       }
-      const file = await this.drawFrom(BG_DIR, 'backgrounds');
+      const file = await this.nextFrom(BG_DIR, 'backgrounds');
       if (!file) {
         dbg('resolveRest — pool backgrounds/ VIDE, image inchangée');
         return; // on ne mémorise pas le domaine → retry possible
@@ -226,7 +224,7 @@
 
     // Fallback async (cash manqué) : tirage au START, activation en .then.
     async resolveLoading() {
-      let file = await this.drawFrom(LD_DIR, 'loadings');
+      let file = await this.nextFrom(LD_DIR, 'loadings');
       if (!file) {
         file = this.lastRest; // fallback : pool vide → image repos
         if (!file) {
@@ -246,7 +244,7 @@
     // ça, la couche opaque frame 0 laisse transparaître le repos
     // quelques frames ("parfois ça marche" = bitmap déjà en cache).
     async prefetchLoading() {
-      const file = await this.drawFrom(LD_DIR, 'loadings');
+      const file = await this.nextFrom(LD_DIR, 'loadings');
       if (!file) {
         dbg('prefetch — pool vide, pas de pré-tirage');
         return;
@@ -738,7 +736,7 @@
       return;
     }
 
-    dbg(`══════ BG-Zen v0.7.2 — fenêtre ${WTAG} — debug ${CONFIG.debug ? 'ACTIF' : 'off'} ══════`);
+    dbg(`══════ BG-Zen v0.7.3 — fenêtre ${WTAG} — debug ${CONFIG.debug ? 'ACTIF' : 'off'} ══════`);
     dbg(`CONFIG enter=${CONFIG.enterMs}ms exit=${CONFIG.exitMs}ms bar=${CONFIG.barTotalMs}ms verbose=${CONFIG.debugVerbose}`);
 
     // Pré-tirage de la 1ère image de loading : invisible pendant le

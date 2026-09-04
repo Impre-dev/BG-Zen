@@ -9,15 +9,12 @@
 |---|---|---|
 | v0.7.0 | Voile Nebula (`--nebula-browser-veil`) + §2 override + ui-tint restauré ; §3 recalibrée ; suivi loading sidebar (blur 0 + transitions synchronisées) | `4e1ef6b`, `face46f`, `e246cfb` |
 | v0.7.1 | Fix flash v2 (tirage repos au STOP + warm-up décodage + TabSelect skip + double tirage éliminé) ; flash v3 (`startSession` partagé, splash au TabSelect d'une tab fraîche) ; logs v2 durables | `b8af574` |
-| v0.7.2 | **Playlists shuffle** (`drawFrom` + queues Fisher-Yates) + **grâce supprimée** (cause du « 5× la même image d'affilée » — preuve log `w57y`). Validé : ~40 loadings, zéro répétition consécutive, passes complètes 6/7, jointures propres. | voir log Git |
+| v0.7.2 | **Playlists shuffle** (`drawFrom` + queues Fisher-Yates) + **grâce supprimée** (cause du « 5× la même image d'affilée » — preuve log `w57y`). Validé : ~40 loadings, zéro répétition consécutive, passes complètes 6/7, jointures propres. | `aea555e` |
+| v0.7.3 | **Roulement séquentiel** (`nextFrom` : tri collation, curseur par dossier, wrap + relecture du dossier à chaque tour, anti-répétition jointure) remplace le shuffle. Validé `wps2` : loadings cycle 7 (~1 tour ¾), backgrounds cycle 6 (~2 tours ½), zéro répétition. | ci-dessous |
 
 ## 🎯 File priorisée
 
-### 1. Roulement séquentiel (remplace le shuffle) ⭐ prochain
-**Demande** : plus d'aléa — lecture des wallpapers dans l'ordre (tri du dossier), les uns après les autres, boucle au début. Garantit « ça change à chaque fois » (pool > 1) en déterministe.
-**Implémentation** : `drawFrom` → `nextFrom` : tri alphabétique (`sort()`), index par dossier qui avance de 1, `% files.length`, relecture du dossier à chaque tour complet (ajouts/retraits pris en compte). Moins de code que le shuffle.
-
-### 2. Reset du log à chaque session
+### 1. Reset du log à chaque session
 **Demande** : chaque fenêtre = nouveau départ ; les traces des sessions précédentes polluent les lectures et font grossir le fichier pour rien.
 **Implémentation** : à l'init, **tronquer** le fichier avant le header (`IOUtils.writeUTF8` sans append = écrase — le bug de plateforme devient une feature). La cap 200 Ko glissante devient une sécurité résiduelle. Limite acceptée : multi-fenêtres simultanées → la dernière écrase.
 
