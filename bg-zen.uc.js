@@ -74,10 +74,12 @@
   }
 
   /* ---------- Log debug fichier ---------- */
-  // Tout l'enchaînement chargement atterrit dans bgzen-debug.log
-  // (cap ~200 Ko glissante). ⚠️ data runtime → gitignoré.
-  // Écritures sérialisées (chaîne de promesses) + dbg blindé :
-  // le logging ne peut JAMAIS casser l'appelant.
+  // Tout l'enchaînement chargement atterrit dans bgzen-debug.log.
+  // Reset à chaque session : la fenêtre de démarrage tronque le
+  // fichier à son init (voir init) — chaque session = nouveau départ.
+  // Cap ~200 Ko glissante = sécurité résiduelle (multi-fenêtres).
+  // ⚠️ data runtime → gitignoré. Écritures sérialisées (chaîne de
+  // promesses) + dbg blindé : le logging ne peut JAMAIS casser l'appelant.
   const LOG_FILE = PathUtils.join(MOD_DIR, 'bgzen-debug.log');
   const WTAG = 'w' + Math.random().toString(36).slice(2, 5); // tag fenêtre — démêle le multi-fenêtres
   let writeChain = Promise.resolve();
@@ -730,13 +732,24 @@
     }
     window.__bgZenLoaded = true;
 
+    // Reset du log à chaque session de navigation : seule la fenêtre
+    // de démarrage (aucune autre fenêtre ouverte) tronque le fichier —
+    // les fenêtres Ctrl+N s'appendent avec leur WTAG, elles ne
+    // wipe pas la session en cours. Troncation sérialisée sur
+    // writeChain AVANT le header → zéro course avec les dbg du boot.
+    if (BootSplash.isStartupWindow()) {
+      writeChain = writeChain
+        .then(() => IOUtils.writeUTF8(LOG_FILE, ''))
+        .catch((ex) => console.error('[BG-Zen] reset log impossible:', ex.message));
+    }
+
     const layers = createLayers();
     if (!layers) {
       log('ERREUR — #main-window introuvable');
       return;
     }
 
-    dbg(`══════ BG-Zen v0.7.3 — fenêtre ${WTAG} — debug ${CONFIG.debug ? 'ACTIF' : 'off'} ══════`);
+    dbg(`══════ BG-Zen v0.7.4 — fenêtre ${WTAG} — debug ${CONFIG.debug ? 'ACTIF' : 'off'} ══════`);
     dbg(`CONFIG enter=${CONFIG.enterMs}ms exit=${CONFIG.exitMs}ms bar=${CONFIG.barTotalMs}ms verbose=${CONFIG.debugVerbose}`);
 
     // Pré-tirage de la 1ère image de loading : invisible pendant le
