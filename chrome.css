@@ -148,6 +148,7 @@ html[nebula-compact-mode] #browser:has(#navigator-toolbox[zen-has-hover='true'])
   background-attachment: fixed !important; /* ancre aux coords viewport = couche §1 */
   filter: blur(var(--bgzen-blur, 10px)) !important;
   opacity: 1 !important; /* copie nette — les facteurs d'atténuation vivent dans le ::after */
+  transition: filter var(--bgzen-exit, 400ms) ease; /* re-flou doux au reveal du loading */
 }
 
 html[nebula-compact-mode] #browser:has(#navigator-toolbox[zen-has-hover='true']) #navigator-toolbox > #titlebar::after {
@@ -161,6 +162,20 @@ html[nebula-compact-mode] #browser:has(#navigator-toolbox[zen-has-hover='true'])
     linear-gradient(var(--nebula-ui-tint, transparent), var(--nebula-ui-tint, transparent)) !important;
   opacity: 1 !important; /* Nebula : grain op 0 */
   mix-blend-mode: normal !important; /* Nebula : overlay (grain) */
+}
+
+/* Suivi du loading screen : quand [bgzen-loading] est posé (§5), la couche
+   plein-écran bascule sur --bgzen-loading-image — la copie de la barre suit
+   (même geometry cover). Sandwich inchangé : le splash de nav est SOUS le
+   voile + le tint, contrairement au boot splash (z-max, hors sandwich).
+   Un :has de plus que la règle de base → gagne pendant le chargement.
+   blur(0) : la couche loading est NETTE après son de-blur d'entrée —
+   la barre de-blur en parallèle (16→0 côté couche, 10→0 ici, même tempo
+   --bgzen-enter) puis re-floue au reveal via la transition de la base. */
+html[nebula-compact-mode] #browser:has(.browserSidebarContainer[bgzen-loading]):has(#navigator-toolbox[zen-has-hover='true']) #navigator-toolbox > #titlebar::before {
+  background-image: var(--bgzen-loading-image) !important;
+  filter: blur(0px) !important;
+  transition: filter var(--bgzen-enter, 300ms) ease;
 }
 
 /* =============================================
