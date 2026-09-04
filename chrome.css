@@ -88,29 +88,79 @@
 }
 
 /* =============================================
-   §3  SIDEBAR GLASS — au hover du toolbox
-   (design fork : la sidebar n'apparaît qu'au
-   hover, bg aligné volontairement NET).
-   Technique : background-attachment: fixed ancre
-   l'image au VIEWPORT → même scène alignée que
-   la couche, continuation pixel-perfect.
-   Nouveau : calque linear-gradient(--bgzen-glass)
-   par-dessus l'image = le "filtre foncé" du
-   repos, sans pseudo-élément.
+   §3  SIDEBAR GLASS — compact hover, réplique
+   EXACTE du sandwich des marges (rework 04/09,
+   recalibré voile — cf POST-MORTEM racine).
+
+   Sandwich VÉRIFIÉ des marges au repos :
+   couche §1 × voile natif 0.6
+   (#zen-browser-background::after, rgba(0,0,0,.4)
+   — repris en main par Nebula var
+   --nebula-browser-veil) × tint 0.8 du wrapper
+   (--nebula-ui-tint) × op 0.98 (body) =
+   net ≈ 0.47 (mesuré 0.415 pipette).
+   ⚠️ L'opacité TabsToolbar 0.8 ne teint PAS le
+   backdrop des marges (opacity = pixels peints
+   par l'élément, pas ce qui est derrière) —
+   l'ancien modèle 0.8×0.8×0.98=0.627 était
+   faux pour cette raison.
+
+   En compact la barre flottante n'a PAS ce
+   backdrop (page web) → on réplique le sandwich
+   DANS ses pseudos :
+   • ::before = copie de l'image, attachment
+     fixed + geometry exacte (vars JS
+     --bgzen-cover-*) + blur(var --bgzen-blur)
+     + opacity 1 — les pseudos du titlebar sont
+     HORS des groupes opacité, aucun facteur à
+     répliquer ici
+   • ::after = voile + tint empilés (2 gradients)
+     → réplique ×0.6 (browser veil) × ×0.8
+     (ui-tint), suit light/dark tout seul
+   • body op 0.98 s'applique naturellement
+   Net = 1×0.6×0.8×0.98 ≈ 0.47 = marges, par
+   construction.
+
+   Scopé html[nebula-compact-mode] : en mode
+   normal plus RIEN ne s'allume au hover (le
+   sandwich natif est déjà parfait — leçon du
+   diff : l'ancien §3 non scopé le cassait).
+   Spécificité (4 ids) > Nebula §3/§3b → gagne
+   quel que soit l'ordre de chargement des mods.
+   Nebula §3b continue de fournir box-shadow +
+   radius + overflow:hidden (clip du bleed).
    ============================================= */
 
-#browser:has(#navigator-toolbox[zen-has-hover='true']) #titlebar {
-  background-image:
-    linear-gradient(var(--bgzen-glass), var(--bgzen-glass)),
-    var(--bgzen-image) !important;
-  background-size: cover !important;
-  background-position: center !important;
-  background-repeat: no-repeat !important;
-  background-attachment: fixed !important;
+html[nebula-compact-mode] #browser:has(#navigator-toolbox[zen-has-hover='true']) #navigator-toolbox > #titlebar {
+  background-color: transparent !important; /* neutralise le 0.4 de Nebula §3b */
+  backdrop-filter: none !important; /* la copie porte son propre blur */
+}
 
-  backdrop-filter: var(--bgzen-glass-filter) !important;
-  box-shadow: var(--bgzen-glass-shadow) !important;
-  border-radius: 6px !important;
+html[nebula-compact-mode] #browser:has(#navigator-toolbox[zen-has-hover='true']) #navigator-toolbox > #titlebar::before {
+  content: '' !important;
+  position: absolute !important;
+  inset: -64px !important; /* bleed du blur, clipé par l'overflow:hidden Nebula §3b */
+  z-index: -1 !important;
+  background-image: var(--bgzen-image) !important;
+  background-size: var(--bgzen-cover-size, cover) !important;
+  background-position: var(--bgzen-cover-pos, center) !important;
+  background-repeat: no-repeat !important;
+  background-attachment: fixed !important; /* ancre aux coords viewport = couche §1 */
+  filter: blur(var(--bgzen-blur, 10px)) !important;
+  opacity: 1 !important; /* copie nette — les facteurs d'atténuation vivent dans le ::after */
+}
+
+html[nebula-compact-mode] #browser:has(#navigator-toolbox[zen-has-hover='true']) #navigator-toolbox > #titlebar::after {
+  content: '' !important;
+  position: absolute !important;
+  inset: -64px !important;
+  z-index: -1 !important;
+  /* voile natif + tint wrapper empilés = réplique du sandwich des marges (×0.6×0.8) */
+  background-image:
+    linear-gradient(var(--nebula-browser-veil, transparent), var(--nebula-browser-veil, transparent)),
+    linear-gradient(var(--nebula-ui-tint, transparent), var(--nebula-ui-tint, transparent)) !important;
+  opacity: 1 !important; /* Nebula : grain op 0 */
+  mix-blend-mode: normal !important; /* Nebula : overlay (grain) */
 }
 
 /* =============================================
@@ -202,8 +252,13 @@
 }
 
 @keyframes bgzen-hint-pulse {
-  0%, 100% { opacity: 0.35; }
-  50%      { opacity: 1; }
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 /* ⚠️ nth-child(2) et PAS last-child : le hint du press start
@@ -218,8 +273,16 @@
 /* Fallback keyframes si le moteur motion de Zen est
    indisponible au boot (anim JS = spring stagger). */
 @keyframes bgzen-boot-in {
-  from { opacity: 0; transform: translateY(20px); filter: blur(2px); }
-  to   { opacity: 1; transform: none;            filter: blur(0); }
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
 }
 
 #bgzen-boot-title.bgzen-css-anim span {

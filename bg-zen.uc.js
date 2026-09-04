@@ -170,6 +170,7 @@
       this.currentDomain = domain;
       this.lastRest = file;
       this.setVar('--bgzen-image', file);
+      Sidebar.geometry(); // crop de la copie sidebar (§3) suit le tirage
     },
 
     // Fallback async (cash manqué) : tirage au START, activation en .then.
@@ -232,6 +233,54 @@
   };
 
   /* ---------- Couches ---------- */
+
+  /* ---------- Sidebar glass (§3) ----------
+     La sidebar compact (barre flottante au hover) peint une copie du
+     wallpaper (chrome.css §3) pour répliquer le sandwich visible dans
+     les marges : image blur(restBlurPx) × tint 0.2 (wrapper Nebula)
+     × op 0.8 (TabsToolbar) × op 0.98 (body) — mesuré 04/09 par diff
+     de snapshots DOM (repos vs hover). Le crop de la copie DOIT être
+     identique à celui de la couche §1 : un cover CSS sur le viewport
+     ≠ cover de la box viewport+128px bleed → geometry exacte calculée
+     ici, en coords viewport (consommée en background-attachment:fixed). */
+
+  const Sidebar = {
+    lastFile: null,
+    lastW: 0,
+    lastH: 0,
+    sizes: new Map(), // cache natural size par fichier
+
+    async geometry() {
+      const file = Resolver.lastRest;
+      if (!file) return;
+      if (file === this.lastFile && window.innerWidth === this.lastW && window.innerHeight === this.lastH) return;
+      let nat = this.sizes.get(file);
+      if (!nat) {
+        try {
+          const img = new Image();
+          img.src = PathUtils.toFileURI(file);
+          await img.decode();
+          nat = { w: img.naturalWidth, h: img.naturalHeight };
+          this.sizes.set(file, nat);
+        } catch (ex) {
+          dbg('sidebar geometry — décodage échoué:', ex.message);
+          return;
+        }
+      }
+      if (file !== Resolver.lastRest) return; // tirage changé pendant le decode
+      const B = 64; // bleed miroir de la couche §1 (inset: -64px)
+      const W = window.innerWidth, H = window.innerHeight;
+      const s = Math.max((W + 2 * B) / nat.w, (H + 2 * B) / nat.h);
+      const w = Math.round(nat.w * s), h = Math.round(nat.h * s);
+      const root = document.documentElement.style;
+      root.setProperty('--bgzen-cover-size', `${w}px ${h}px`);
+      root.setProperty('--bgzen-cover-pos', `${Math.round((W - w) / 2)}px ${Math.round((H - h) / 2)}px`);
+      this.lastFile = file;
+      this.lastW = W;
+      this.lastH = H;
+      dbg(`sidebar geometry ${w}x${h} (cover box bleed ${W + 2 * B}x${H + 2 * B})`);
+    },
+  };
 
   function createLayers() {
     const mw = document.getElementById('main-window');
@@ -624,6 +673,8 @@
     Resolver.resolveRest(getDomain(gBrowser.selectedBrowser)).then(() => Resolver.prefetchLoading());
     setupProgress(layers.loading);
     setupTabSelect();
+    Sidebar.geometry(); // 1er calcul (image de la session en cours)
+    window.addEventListener('resize', () => Sidebar.geometry()); // event-driven, jamais de re-tirage
     // Boot splash : uniquement sur la fenêtre de démarrage. Les
     // fenêtres ouvertes en cours de session (Ctrl+N) passent direct
     // en mode nav — attribut posé avant le 1er paint, aucun flash.
