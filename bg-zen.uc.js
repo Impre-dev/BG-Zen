@@ -11,7 +11,7 @@
    - Deux couches superposées dans #main-window (isolation en CSS §0)
    - Garde de session : un START pendant un splash actif (redirect,
      reload) ne re-tirage rien → zéro flash, zéro 2e image.
-   - Grâce stabilizeMs : pas de re-tirage loading juste après un reveal.
+   - Playlists shuffle : chaque image 1× par passe (backgrounds + loadings).
    - Entrée animée (fade + de-blur, miroir de la sortie).
    - Logs debug dans bgzen-debug.log (CONFIG.debug).
    ⚠️ JAMAIS de background-image sur #main-window (bug transparence).
@@ -28,7 +28,6 @@
     exitMs: 400, // anim de sortie de la couche loading (pt 5)
     barTotalMs: 1000, // barre (850) + 150ms de grâce paint : le contenu
     // a le temps d'être affiché avant le reveal
-    stabilizeMs: 2000, // pas de re-tirage loading si reveal < 2s (anti double-image)
     bootFadeMs: 600, // fade de sortie du boot splash (pseudo ::after CSS §6)
     bootRevealCdMs: 1000, // VALIDÉ 03/09 : cd du reveal AU BOOT en press start.
     // Testé 0 (cash) puis 500 → 1000ms = bon feeling, cohérent avec
@@ -164,13 +163,36 @@
       }
     },
 
-    pick(files, exclude) {
+    // Playlists shuffle (Fisher-Yates) : chaque image du pool sort UNE
+    // fois par passe ; queue épuisée → reshuffle (dossier relu : les
+    // ajouts/retraits sont pris en compte à chaque passe). Anti-répé-
+    // tition aux jointures : la 1re de la nouvelle passe ≠ dernière
+    // jouée de l'ancienne. Fini le random uniforme et ses retours en
+    // boucle (le "5x la même image d'affilée").
+    queues: new Map(), // dir → { queue: [], last: null }
+
+    async drawFrom(dir, label) {
+      const files = await this.listImages(dir);
       if (!files.length) return null;
-      let pool = files;
-      if (files.length > 1 && exclude) {
-        pool = files.filter((f) => f !== exclude); // anti-répétition
+      let st = this.queues.get(dir);
+      if (!st) this.queues.set(dir, (st = { queue: [], last: null }));
+      if (!st.queue.length) {
+        st.queue = files.slice();
+        for (let i = st.queue.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [st.queue[i], st.queue[j]] = [st.queue[j], st.queue[i]];
+        }
+        if (st.queue.length > 1 && st.queue[st.queue.length - 1] === st.last) {
+          [st.queue[0], st.queue[st.queue.length - 1]] = [st.queue[st.queue.length - 1], st.queue[0]];
+        }
+        dbg(`🔀 shuffle ${label} — passe de ${st.queue.length} images`);
       }
-      return pool[Math.floor(Math.random() * pool.length)];
+      const file = st.queue.pop();
+      // Image retirée du dossier en cours de passe → sautée (setVar sur
+      // un fichier absent peindrait vide).
+      if (!(await IOUtils.exists(file))) return this.drawFrom(dir, label);
+      st.last = file;
+      return file;
     },
 
     setVar(name, file) {
@@ -182,7 +204,7 @@
         dbgV('resolveRest SKIP — même domaine:', domain || '(vide)');
         return; // zéro flash intra-site
       }
-      const file = this.pick(await this.listImages(BG_DIR), this.lastRest);
+      const file = await this.drawFrom(BG_DIR, 'backgrounds');
       if (!file) {
         dbg('resolveRest — pool backgrounds/ VIDE, image inchangée');
         return; // on ne mémorise pas le domaine → retry possible
@@ -204,7 +226,7 @@
 
     // Fallback async (cash manqué) : tirage au START, activation en .then.
     async resolveLoading() {
-      let file = this.pick(await this.listImages(LD_DIR), this.lastLoading);
+      let file = await this.drawFrom(LD_DIR, 'loadings');
       if (!file) {
         file = this.lastRest; // fallback : pool vide → image repos
         if (!file) {
@@ -224,7 +246,7 @@
     // ça, la couche opaque frame 0 laisse transparaître le repos
     // quelques frames ("parfois ça marche" = bitmap déjà en cache).
     async prefetchLoading() {
-      const file = this.pick(await this.listImages(LD_DIR), this.lastLoading);
+      const file = await this.drawFrom(LD_DIR, 'loadings');
       if (!file) {
         dbg('prefetch — pool vide, pas de pré-tirage');
         return;
@@ -246,17 +268,14 @@
     // version affichait l'image repos dans la couche loading → le
     // symptôme "on voit le bg permanent" venait de LÀ). Si rien n'est
     // prêt on rend null → l'appelant retombe sur le tirage async.
-    applyLoading(fresh) {
-      const file = fresh ? this.nextLoading : this.lastLoading;
+    // (05/09 : grâce supprimée — chaque session consomme un slot shuffle.)
+    applyLoading() {
+      const file = this.nextLoading;
       if (!file) return null;
       this.setVar('--bgzen-loading-image', file);
-      if (fresh) {
-        this.lastLoading = file;
-        this.nextLoading = null;
-        dbg('applyLoading CASH →', file.split('\\').pop(), '(pré-tirée)');
-      } else {
-        dbg('applyLoading CASH →', file.split('\\').pop(), '(grâce — même image)');
-      }
+      this.lastLoading = file;
+      this.nextLoading = null;
+      dbg('applyLoading CASH →', file.split('\\').pop(), '(pré-tirée)');
       return file;
     },
   };
@@ -591,17 +610,18 @@
     startSession = (origin) => {
       if (loadingLayer.hasAttribute('bgzen-active')) return false;
       clearTimeout(unmaskTimer); // reveal différé annulé : nouvelle session
-      const sinceReveal = Date.now() - lastRevealAt;
-      const fresh = sinceReveal > CONFIG.stabilizeMs;
-      const detail = lastRevealAt === 0 ? 'première session' : `reveal il y a ${Math.round(sinceReveal)}ms`;
-      dbg(`🎬 SESSION ${origin} — ${fresh ? `tirage (${detail})` : `grâce <${CONFIG.stabilizeMs}ms, même image`}`);
+      // (05/09 : grâce supprimée — le splash CASH opaque frame 0 rend le
+      // re-tirage propre à chaque session ; l'anti double-image vit
+      // désormais dans la queue shuffle, chaque image 1× par passe.)
+      const detail = lastRevealAt ? ` (reveal il y a ${Math.round(Date.now() - lastRevealAt)}ms)` : ' (première session)';
+      dbg(`🎬 SESSION ${origin} — tirage${detail}`);
       const container = document.querySelector('.browserSidebarContainer.deck-selected');
       const activate = (msg) => {
         loadingLayer.setAttribute('bgzen-active', '');
         dbg(`   ${msg}`);
         container?.toggleAttribute('bgzen-loading', true); // wrapper masqué (§5)
       };
-      if (Resolver.applyLoading(fresh)) {
+      if (Resolver.applyLoading()) {
         activate(`▶️ SPLASH ACTIF CASH (opaque 0s + de-blur ${CONFIG.enterMs}ms)`);
       } else {
         Resolver.resolveLoading().then(() => activate('▶️ SPLASH ACTIF (cash manqué → fade + de-blur)'));
@@ -718,8 +738,8 @@
       return;
     }
 
-    dbg(`══════ BG-Zen v0.7.1 — fenêtre ${WTAG} — debug ${CONFIG.debug ? 'ACTIF' : 'off'} ══════`);
-    dbg(`CONFIG enter=${CONFIG.enterMs}ms exit=${CONFIG.exitMs}ms bar=${CONFIG.barTotalMs}ms grâce=${CONFIG.stabilizeMs}ms verbose=${CONFIG.debugVerbose}`);
+    dbg(`══════ BG-Zen v0.7.2 — fenêtre ${WTAG} — debug ${CONFIG.debug ? 'ACTIF' : 'off'} ══════`);
+    dbg(`CONFIG enter=${CONFIG.enterMs}ms exit=${CONFIG.exitMs}ms bar=${CONFIG.barTotalMs}ms verbose=${CONFIG.debugVerbose}`);
 
     // Pré-tirage de la 1ère image de loading : invisible pendant le
     // boot (le pan boot.jpg couvre tout), mais CASH pour la 1ère
