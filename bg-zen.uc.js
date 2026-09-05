@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           BG-Zen
-// @version        0.6.2
+// @version        0.7.5
 // @description    Wallpaper derrière l'UI de Zen — pools repos/loading, glass constant, splash
 // @author         Impre
 // @include        main
@@ -11,7 +11,7 @@
    - Deux couches superposées dans #main-window (isolation en CSS §0)
    - Garde de session : un START pendant un splash actif (redirect,
      reload) ne re-tirage rien → zéro flash, zéro 2e image.
-   - Playlists shuffle : chaque image 1× par passe (backgrounds + loadings).
+   - Roulement séquentiel : chaque image 1× par tour (backgrounds + loadings).
    - Entrée animée (fade + de-blur, miroir de la sortie).
    - Logs debug dans bgzen-debug.log (CONFIG.debug).
    ⚠️ JAMAIS de background-image sur #main-window (bug transparence).
@@ -82,26 +82,42 @@
   // promesses) + dbg blindé : le logging ne peut JAMAIS casser l'appelant.
   const LOG_FILE = PathUtils.join(MOD_DIR, 'bgzen-debug.log');
   const WTAG = 'w' + Math.random().toString(36).slice(2, 5); // tag fenêtre — démêle le multi-fenêtres
-  let writeChain = Promise.resolve();
 
   // ⚠️ Ce build Zen TRONQUE avec IOUtils.writeUTF8(…, { append: true })
   // (prouvé en console : 2 appends successifs → fichier = dernière ligne seule).
-  // → read-append-write sérialisé sur writeChain (zéro race inter-écritures),
-  //   cap glissante ~200 Ko intégrée (coupe propre au \n) — plus de rotation.
-  async function appendLine(line) {
-    let prev = '';
-    try { prev = await IOUtils.readUTF8(LOG_FILE); } catch { /* 1er boot : fichier absent */ }
-    if (prev.length > 200 * 1024) {
-      const cut = prev.indexOf('\n', prev.length - 200 * 1024);
-      prev = (cut >= 0 ? prev.slice(cut + 1) : prev.slice(-200 * 1024));
+  // → v0.7.5 (perf) : cache mémoire + batch par task JS. Le fichier n'est
+  //   lu QU'UNE fois (lazy, au 1er flush) ; chaque dbg() ne fait qu'un
+  //   push dans logQueue ; queueMicrotask vide la queue → 1 écriture par
+  //   task au lieu d'un read-append-write complet PAR LIGNE (10-15 I/O
+  //   par nav → 1). Cap glissante ~200 Ko en mémoire. Trade-off assumé :
+  //   deux fenêtres concurrentes ont chacune leur cache (dernière
+  //   écriture gagne) — le debug multi-fenêtres reste lisible via les
+  //   WTAG, la perte croisée éventuelle est acceptable pour du log de dev.
+  let logCache = null; // contenu disque en mémoire (null = pas encore lu)
+  let logQueue = []; // lignes de la task courante — flush en microtask
+
+  async function flushQueue() {
+    if (!logQueue.length) return;
+    const lines = logQueue;
+    logQueue = [];
+    try {
+      if (logCache === null) {
+        try { logCache = await IOUtils.readUTF8(LOG_FILE); } catch { /* 1er boot : fichier absent */ }
+      }
+      logCache += lines.join('\n') + '\n';
+      if (logCache.length > 200 * 1024) {
+        const cut = logCache.indexOf('\n', logCache.length - 200 * 1024);
+        logCache = cut >= 0 ? logCache.slice(cut + 1) : logCache.slice(-200 * 1024);
+      }
+      await IOUtils.writeUTF8(LOG_FILE, logCache);
+    } catch (ex) {
+      console.error('[BG-Zen] écriture log impossible:', ex.message);
     }
-    await IOUtils.writeUTF8(LOG_FILE, prev + line + '\n');
   }
 
   function writeLog(line) {
-    writeChain = writeChain
-      .then(() => appendLine(line))
-      .catch((ex) => console.error('[BG-Zen] écriture log impossible:', ex.message));
+    logQueue.push(line);
+    queueMicrotask(flushQueue); // event-driven : fin de la task courante, zéro timer
   }
 
   // Format unique : [fenêtre] HH:MM:SS.mmm — une seule horloge, zéro doublon.
@@ -240,11 +256,13 @@
     },
 
     // Pré-tirage (au reveal + à l'init) : choisit l'image de la
-    // PROCHAINE session sans toucher à la var — le fade de sortie
-    // n'est jamais écrasé. Au START suivant : switch cash synchrone.
-    // + warm-up décodage : une image non décodée peint VIDE — sans
-    // ça, la couche opaque frame 0 laisse transparaître le repos
-    // quelques frames ("parfois ça marche" = bitmap déjà en cache).
+    // PROCHAINE session. La var n'est PAS posée ici directement mais
+    // via warmTexture — qui attend la fin du fade de sortie (l'image
+    // du crossfade en cours ne doit jamais être écrasée). Au START
+    // suivant : applyLoading repose la valeur (idempotent) sur une
+    // texture DÉJÀ en VRAM. + warm-up décodage : une image non
+    // décodée peint VIDE — sans ça, la couche opaque frame 0 laisse
+    // transparaître le repos quelques frames.
     async prefetchLoading() {
       const file = await this.nextFrom(LD_DIR, 'loadings');
       if (!file) {
@@ -261,6 +279,49 @@
       } catch (ex) {
         dbg('prefetch decode échec:', ex.message);
       }
+      this.warmTexture(file);
+    },
+
+    // Fix flash (05/09 — texture GPU chaude) : img.decode() ne réchauffe
+    // que le cache CPU. La TEXTURE WebRender de la couche n'existe que si
+    // la couche PEINT l'image — elle y est désormais (opacity 0.01, plus
+    // jamais visibility:hidden). On pose donc la var de la prochaine
+    // image pendant le repos : l'upload GPU se fait à l'idle, des
+    // secondes avant le START. L'activation devient un pur flip
+    // d'opacité sur texture en VRAM → zéro frame transparente.
+    // ⚠️ Si le fade de sortie court encore (prefetch appelé au reveal),
+    // on attend son transitionend — poser la var maintenant écraserait
+    // l'image du crossfade en cours.
+    warmTexture(file) {
+      const layer = loadingLayerEl;
+      if (!layer || layer.hasAttribute('bgzen-active')) return;
+      const apply = () => {
+        if (this.nextLoading !== file) return; // tirage plus récent → lui prendra la place
+        if (loadingLayerEl?.hasAttribute('bgzen-active')) return; // session relancée entre-temps
+        this.setVar('--bgzen-loading-image', file);
+        dbg('prefetch var POSÉE — texture GPU chauffée à l\'idle →', file.split('\\').pop());
+      };
+      const fading = parseFloat(getComputedStyle(layer).opacity) > 0.02; // fade de sortie en cours
+      if (!fading) {
+        apply();
+        return;
+      }
+      const done = () => {
+        layer.removeEventListener('transitionend', onEnd);
+        clearTimeout(guard);
+        apply();
+      };
+      const onEnd = (e) => {
+        if (e.target !== layer) return;
+        if (e.propertyName !== 'opacity' && e.propertyName !== 'filter') return;
+        done();
+      };
+      layer.addEventListener('transitionend', onEnd);
+      // LAST RESORT: transitionend peut être avalé (fade interrompu par
+      // une nouvelle session, reduced-motion). apply() est gardé
+      // (nextLoading / bgzen-active) → simple filet de debounce,
+      // applyLoading reste l'autorité au START.
+      const guard = setTimeout(done, CONFIG.exitMs + 100);
     },
 
     // Switch CASH au START : var posée en synchrone, retour du fichier.
@@ -269,13 +330,20 @@
     // symptôme "on voit le bg permanent" venait de LÀ). Si rien n'est
     // prêt on rend null → l'appelant retombe sur le tirage async.
     // (05/09 : grâce supprimée — chaque session consomme un slot shuffle.)
+    // Le log CHAUDE/FROIDE valide le warm-up : CHAUDE = la var était
+    // déjà posée à l'idle par warmTexture (texture en VRAM, flip pur) ;
+    // FROIDE = upload GPU à l'activation (cash manqué du prefetch, 1er
+    // boot, fade interrompu) — le flash ne peut plus survenir que là.
     applyLoading() {
       const file = this.nextLoading;
       if (!file) return null;
+      const warm =
+        document.documentElement.style.getPropertyValue('--bgzen-loading-image') ===
+        `url("${PathUtils.toFileURI(file)}")`;
       this.setVar('--bgzen-loading-image', file);
       this.lastLoading = file;
       this.nextLoading = null;
-      dbg('applyLoading CASH →', file.split('\\').pop(), '(pré-tirée)');
+      dbg(`applyLoading CASH → ${file.split('\\').pop()} (pré-tirée, texture ${warm ? 'CHAUDE' : 'FROIDE'})`);
       return file;
     },
   };
@@ -597,6 +665,10 @@
   // fraîche). Posée par setupProgress — closure sur loadingLayer/état.
   let startSession = null;
 
+  // Réf module de la couche loading — Resolver.warmTexture s'en sert pour
+  // chauffer la texture GPU à l'idle (posée par init après createLayers).
+  let loadingLayerEl = null;
+
   function setupProgress(loadingLayer) {
     let unmaskTimer = null; // LAST RESORT: reveal différé = synchro barre (barTotalMs)
     let lastRevealAt = 0; // anti double-image : pas de re-tirage juste après un reveal
@@ -612,14 +684,20 @@
       clearTimeout(unmaskTimer); // reveal différé annulé : nouvelle session
       // (05/09 : grâce supprimée — le splash CASH opaque frame 0 rend le
       // re-tirage propre à chaque session ; l'anti double-image vit
-      // désormais dans la queue shuffle, chaque image 1× par passe.)
+      // désormais dans le roulement séquentiel, chaque image 1× par tour.)
       const detail = lastRevealAt ? ` (reveal il y a ${Math.round(Date.now() - lastRevealAt)}ms)` : ' (première session)';
       dbg(`🎬 SESSION ${origin} — tirage${detail}`);
-      const container = document.querySelector('.browserSidebarContainer.deck-selected');
       const activate = (msg) => {
         loadingLayer.setAttribute('bgzen-active', '');
         dbg(`   ${msg}`);
-        container?.toggleAttribute('bgzen-loading', true); // wrapper masqué (§5)
+        // Masque sur l'ANCÊTRE STABLE #tabbrowser-tabpanels (§5) — jamais
+        // sur .browserSidebarContainer.deck-selected : sur une nav en nouvel
+        // onglet, la session part AVANT le switch du deck → l'ancien
+        // querySelector masquait le container quitté, le nouveau (non
+        // masqué) peignait par-dessus le splash dès son premier paint
+        // (covering précoce, 05/09). L'ancêtre couvre tous les containers,
+        // quel que soit le timing du switch.
+        document.getElementById('tabbrowser-tabpanels')?.setAttribute('bgzen-loading', '');
       };
       if (Resolver.applyLoading()) {
         activate(`▶️ SPLASH ACTIF CASH (opaque 0s + de-blur ${CONFIG.enterMs}ms)`);
@@ -651,7 +729,7 @@
           // complet se lit verticalement : 🌐 START → 🎬 SESSION → 🌐 STOP
           // → TIRAGE repos → ✅ REVEAL → prefetch.
           dbg(`🌐 ${kind} ${url}`);
-          const container = document.querySelector('.browserSidebarContainer.deck-selected');
+          const panels = document.getElementById('tabbrowser-tabpanels'); // masque §5 (ancêtre stable)
 
           if (stateFlags & WPL.STATE_START) {
             clearTimeout(unmaskTimer);
@@ -678,12 +756,13 @@
             const cd = BootSplash.waitMode && !BootSplash.done ? CONFIG.bootRevealCdMs : CONFIG.barTotalMs;
             unmaskTimer = setTimeout(() => {
               loadingLayer.removeAttribute('bgzen-active'); // fade + blur sortant
-              container?.toggleAttribute('bgzen-loading', false); // reveal
+              panels?.removeAttribute('bgzen-loading'); // reveal
               lastRevealAt = Date.now();
               dbg(`✅ REVEAL (fin anim ${CONFIG.exitMs}ms)`);
               BootSplash.finish('1er REVEAL'); // boot splash : on rend la main à l'UI
-              // Pré-tirage de la prochaine image — ne touche pas la
-              // var (fade de sortie intact), event-chained, zéro timer.
+              // Pré-tirage de la prochaine image : warmTexture attend le
+              // transitionend du fade (event-driven) avant de poser la
+              // var → crossfade intact, texture GPU chauffée juste après.
               Resolver.prefetchLoading();
             }, cd);
             dbg(`   reveal dans ${cd}ms`);
@@ -703,22 +782,126 @@
     gBrowser.addTabsProgressListener(listener);
   }
 
-  function setupTabSelect() {
-    gBrowser.tabContainer.addEventListener('TabSelect', () => {
-      const b = gBrowser.selectedBrowser;
-      // ⚠️ Fix flash v1→v3 : tab fraîche (about:blank, nav imminente) →
-      // JAMAIS de tirage nu ici (v1). Mais ne pas attendre le START non
-      // plus (v3) : l'onglet vide est TRANSPARENT, la page quittée peut
-      // être opaque (CustomTab) → le repos flashait pendant les ~30ms
-      // TabSelect→START. On active le splash immédiatement à l'event ;
-      // le START suivant est absorbé par la garde de session.
-      if (!b || b.webProgress?.isLoadingDocument || getDomain(b) === '') {
-        if (BootSplash.waitMode && !BootSplash.done) return; // boot splash couvre déjà tout
-        if (!startSession?.('TabSelect')) dbg('🖱️ TabSelect fraîche — session déjà en cours');
-        return;
+  /* (v0.7.5 — épluchage) setupTabSelect et setupLoadURIHook SUPPRIMÉS :
+   * - setupTabSelect était le DOUBLON event de setupTabSelObserver (même
+   *   logique fraîche/loading, mais APRÈS le MO en réactivité) → fusion.
+   * - setupLoadURIHook (wrappers gBrowser.loadURI/fixupAndLoadURIString)
+   *   était MORT : preuve par le source Zen (URILoadingHelper.sys.mjs
+   *   appelle TOUJOURS targetBrowser.fixupAndLoadURIString — own prop du
+   *   <browser> — jamais gBrowser.* ; et gBrowser.loadURI ne fait que
+   *   forward vers selectedBrowser → déjà couvert par le hook browser).
+   *   Logs wcek/wewb : zéro ⏱️ en des sessions entières. */
+
+  /* ---------- Fix flash : wrappers sur CHAQUE <browser> (LE choke point) ----------
+   * Preuve par le source Zen (browser/omni.ja, 05/09) :
+   * - URILoadingHelper.sys.mjs openInCurrentTab() appelle
+   *   targetBrowser.fixupAndLoadURIString() — la méthode OWN du <browser>,
+   *   JAMAIS gBrowser.* (d'où zéro ⏱️ dans les logs wcek/wewb).
+   * - Les browsers LAZY portent des substitute properties (tabbrowser.js
+   *   l.841-844) déjà fonctionnelles (binds URILoadingWrapper) : on les
+   *   wrappe aussi — une nav sur une tab non liée passe par elles.
+   * - ⚠️ _insertBrowser (l.3102-3107) DELETE toutes les substitutes puis
+   *   repose des binds propres (l.3148-3156) → tout wrapper posé avant
+   *   est DÉTRUIT au link. C'est ce qui tuait le hook sur les tabs
+   *   fraîchement liées (log w69a : nav YouTube sans BrowserNav).
+   * Solution : marqueur SUR LE WRAPPER (pas sur le browser — les props
+   * sont remplacées, le browser survit) + wrap de gBrowser._insertBrowser
+   * pour re-patcher à l'exact moment où les binds sont reposés, AVANT
+   * le chargement initial de la tab (fixup l.4587). */
+  function setupBrowserNavHook() {
+    const patch = (b) => {
+      if (!b) return;
+      for (const name of ['fixupAndLoadURIString', 'loadURI']) {
+        const orig = b[name];
+        if (typeof orig !== 'function') continue;
+        if (orig.__bgzenNavHook) continue; // déjà à nous
+        const wrapped = function (...args) {
+          try {
+            if (!(BootSplash.waitMode && !BootSplash.done)) {
+              // DIAG (05/09) : log inconditionnel — le pass-through silencieux
+              // nous aveuglait quand la session était déjà couverte par TabSelect.
+              const target = String(args[0] instanceof Ci.nsIURI ? args[0].spec : args[0]).slice(0, 60);
+              if (startSession?.('BrowserNav')) dbg(`   ⏱️ ${name}(${target}) → splash POSÉ`);
+              else dbgV(`${name}(${target}) — pass-through (session déjà active)`);
+            }
+          } catch {
+            /* le hook ne doit JAMAIS casser la nav */
+          }
+          return orig.apply(b, args);
+        };
+        wrapped.__bgzenNavHook = true; // marqueur fonction : résiste au delete/repose des props
+        try {
+          Object.defineProperty(b, name, { value: wrapped, writable: true, configurable: true });
+        } catch { /* browser figé → skip */ }
       }
-      // Tab chargée : changement de site à l'écran → tirage live voulu.
-      Resolver.resolveRest(getDomain(b));
+    };
+    for (const t of gBrowser.tabs) patch(t.linkedBrowser); // tabs déjà liées + substitutes lazy
+    gBrowser.tabContainer.addEventListener('TabOpen', (e) => patch(e.target.linkedBrowser));
+    gBrowser.tabContainer.addEventListener('TabSelect', (e) => patch(e.target.linkedBrowser)); // filet swap/re-link
+    // Re-patch au moment EXACT du link : _insertBrowser repose les binds
+    // (notre wrapper d'avant est détruit) et le chargement initial suit
+    // immédiatement — aucun event intermédiaire n'existe entre les deux.
+    const origInsert = gBrowser._insertBrowser.bind(gBrowser);
+    gBrowser._insertBrowser = function (aTab, ...rest) {
+      const r = origInsert(aTab, ...rest);
+      try { patch(aTab?.linkedBrowser); } catch { /* jamais casser le link */ }
+      return r;
+    };
+  }
+
+  /* ---------- Fix flash : MutationObserver sur l'attribut selected ----------
+   * Cas CustomTab→YouTube (05/09) : clic lien content-side (raccourci de
+   * la page d'accueil) → nouvel onglet VIDE/transparent → deck switch →
+   * le paint du deck transparent peut être commité AVANT le dispatch de
+   * TabSelect → 1-2 frames de bg visibles. L'attribut "selected" est
+   * posé sur le tab AVANT le switch visuel (updateSelectedTab) : un
+   * MutationObserver réagit en MICROTASK — avant le prochain frame,
+   * donc avant le paint du deck → splash CASH posé à temps.
+   * Pattern NavBtn/Nebula observePresence : event-driven, zéro polling.
+   * Garde : même logique fraîche/loading que l'ancien setupTabSelect
+   * (v0.7.5 : event fusionné ICI — le MO tire en microtask, AVANT le
+   * paint du deck switch ET avant le dispatch de TabSelect). */
+  function setupTabSelObserver() {
+    const mo = new MutationObserver((muts) => {
+      for (const m of muts) {
+        if (m.type !== 'attributes' || m.attributeName !== 'selected') continue;
+        if (!m.target.hasAttribute('selected')) continue;
+        const b = m.target.linkedBrowser;
+        if (!b || b.webProgress?.isLoadingDocument || getDomain(b) === '') {
+          if (BootSplash.waitMode && !BootSplash.done) return; // boot splash couvre déjà
+          if (!startSession?.('TabSelMO')) dbgV('TabSelMO — session déjà en cours');
+        } else {
+          Resolver.resolveRest(getDomain(b)); // tab chargée : tirage live voulu
+        }
+        return; // un seul selected par switch
+      }
+    });
+    mo.observe(gBrowser.tabContainer, { attributes: true, attributeFilter: ['selected'], subtree: true });
+  }
+
+  /* ---------- Fix flash : TabAttrModified + attribut busy ----------
+   * Pattern NavBtn exact : on écoute l'ÉVÉNEMENT tabbrowser, pas nos
+   * propres progress listeners. Preuve log wcek (04/09) : la nav
+   * YouTube a produit un STOP SANS START chez nous (garde
+   * selectedBrowser filtrée en silence via dbgV) alors que tabbrowser,
+   * lui, avait tout reçu et posé `busy` sur le tab. L'attribut busy
+   * est posé par le progress listener INTERNE de tabbrowser quel que
+   * soit l'appelant de la nav (favori, mod, extension, urlbar, session
+   * restore) → un seul listener couvre tous les chemins. L'event tire
+   * en rafale pendant les chargements : la garde de startSession
+   * (splash actif → return false) court-circuite en 1 check.
+   * Perf NavBtn : le check selectedTab (le plus souvent gagnant) en
+   * premier court-circuite la rafale des tabs en background. */
+  function setupBusyListener() {
+    gBrowser.tabContainer.addEventListener('TabAttrModified', (e) => {
+      try {
+        if (BootSplash.waitMode && !BootSplash.done) return; // boot splash couvre déjà tout
+        if (e.target !== gBrowser.selectedTab) return; // rafale background → exit
+        if (!e.target.hasAttribute('busy')) return; // attr retiré/autre → exit
+        if (startSession?.('Busy')) dbg('   ⏱️ busy posé par tabbrowser → splash immédiat');
+      } catch {
+        /* jamais casser l'event natif */
+      }
     });
   }
 
@@ -735,12 +918,12 @@
     // Reset du log à chaque session de navigation : seule la fenêtre
     // de démarrage (aucune autre fenêtre ouverte) tronque le fichier —
     // les fenêtres Ctrl+N s'appendent avec leur WTAG, elles ne
-    // wipe pas la session en cours. Troncation sérialisée sur
-    // writeChain AVANT le header → zéro course avec les dbg du boot.
+    // wipe pas la session en cours. Reset mémoire + disque AVANT le
+    // header : zéro course possible (aucun dbg n'a encore flushé).
     if (BootSplash.isStartupWindow()) {
-      writeChain = writeChain
-        .then(() => IOUtils.writeUTF8(LOG_FILE, ''))
-        .catch((ex) => console.error('[BG-Zen] reset log impossible:', ex.message));
+      logCache = '';
+      logQueue = [];
+      IOUtils.writeUTF8(LOG_FILE, '').catch((ex) => console.error('[BG-Zen] reset log impossible:', ex.message));
     }
 
     const layers = createLayers();
@@ -749,15 +932,18 @@
       return;
     }
 
-    dbg(`══════ BG-Zen v0.7.4 — fenêtre ${WTAG} — debug ${CONFIG.debug ? 'ACTIF' : 'off'} ══════`);
+    dbg(`══════ BG-Zen v0.7.5 — fenêtre ${WTAG} — debug ${CONFIG.debug ? 'ACTIF' : 'off'} ══════`);
     dbg(`CONFIG enter=${CONFIG.enterMs}ms exit=${CONFIG.exitMs}ms bar=${CONFIG.barTotalMs}ms verbose=${CONFIG.debugVerbose}`);
 
     // Pré-tirage de la 1ère image de loading : invisible pendant le
     // boot (le pan boot.jpg couvre tout), mais CASH pour la 1ère
     // navigation d'après le reveal.
     Resolver.resolveRest(getDomain(gBrowser.selectedBrowser)).then(() => Resolver.prefetchLoading());
+    loadingLayerEl = layers.loading; // warmTexture (fix flash texture GPU)
     setupProgress(layers.loading);
-    setupTabSelect();
+    setupBrowserNavHook(); // flash : choke point — own props fixupAndLoadURIString/loadURI sur chaque <browser>
+    setupTabSelObserver(); // flash : attribut selected via MutationObserver — AVANT le paint du deck switch
+    setupBusyListener(); // flash : attribut busy (event tabbrowser, pattern NavBtn) — filet pour les navs hors hook
     Sidebar.geometry(); // 1er calcul (image de la session en cours)
     window.addEventListener('resize', () => Sidebar.geometry()); // event-driven, jamais de re-tirage
     // Boot splash : uniquement sur la fenêtre de démarrage. Les
@@ -765,7 +951,7 @@
     // en mode nav — attribut posé avant le 1er paint, aucun flash.
     if (BootSplash.isStartupWindow()) BootSplash.install();
     else document.getElementById('main-window')?.setAttribute('bgzen-booted', '');
-    log('init v0.6.2 — press start réactif : hint cash au 1er STOP (bootRevealCdMs=0, barTotalMs intact)');
+    log('init v0.7.5 — épluchage : hook gBrowser supprimé (mort, preuve source), TabSelect fusionné dans TabSelMO, logging batché par task');
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') init();

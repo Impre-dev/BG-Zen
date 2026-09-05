@@ -65,22 +65,28 @@
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
-  opacity: 0;
-  visibility: hidden;
+  /* Fix flash (05/09) : JAMAIS visibility:hidden — un élément hidden
+     est retiré du display list → sa texture WebRender est évictée entre
+     les sessions. À l'activation : swap d'image + upload GPU asynchrone
+     = 1-3 frames transparentes où seule la couche repos (chaude) est
+     visible = le flash « bg puis loading screen ». opacity 0.01 garde
+     la couche dans le display list : texture uploadée à l'idle (var
+     posée par warmTexture côté JS), invisible à l'œil. */
+  opacity: 0.01;
   filter: blur(16px);
-  /* sortie : fade + blur, visibility retardée pour laisser l'anim finir */
+  /* sortie : fade + blur montants (l'état caché = retour à opacity 0.01) */
   transition:
     opacity var(--bgzen-exit, 400ms) ease,
-    filter var(--bgzen-exit, 400ms) ease,
-    visibility 0s linear var(--bgzen-exit, 400ms);
+    filter var(--bgzen-exit, 400ms) ease;
 }
 
 #bgzen-loading-layer[bgzen-active] {
   opacity: 1;
-  visibility: visible;
   filter: blur(0px);
-  /* Entrée CASH : opaque frame 0 — l'image est pré-tirée et posée en
-     synchrone au START, le repos n'est jamais visible. Seul le de-blur
+  /* Entrée CASH : opaque frame 0 — texture déjà en VRAM (chauffée à
+     l'idle par warmTexture : couche jamais hidden + var posée au
+     prefetch), le flip d'opacité est une opération composite pure :
+     zéro raster, zéro upload, zéro fenêtre de bg repos. Seul le de-blur
      anime. La sortie (état de base) garde son fade + blur montant. */
   transition:
     opacity 0s,
@@ -172,27 +178,36 @@ html[nebula-compact-mode] #browser:has(#navigator-toolbox[zen-has-hover='true'])
    blur(0) : la couche loading est NETTE après son de-blur d'entrée —
    la barre de-blur en parallèle (16→0 côté couche, 10→0 ici, même tempo
    --bgzen-enter) puis re-floue au reveal via la transition de la base. */
-html[nebula-compact-mode] #browser:has(.browserSidebarContainer[bgzen-loading]):has(#navigator-toolbox[zen-has-hover='true']) #navigator-toolbox > #titlebar::before {
+html[nebula-compact-mode] #browser:has(#tabbrowser-tabpanels[bgzen-loading]):has(#navigator-toolbox[zen-has-hover='true']) #navigator-toolbox > #titlebar::before {
   background-image: var(--bgzen-loading-image) !important;
   filter: blur(0px) !important;
   transition: filter var(--bgzen-enter, 300ms) ease;
 }
 
 /* =============================================
-   §5  SPLASH — masquage total du wrapper pendant
-   le chargement. Attribut bgzen-loading posé par
-   bg-zen.uc.js (STATE_START / STATE_STOP),
-   reveal à 850ms (synchro MyLoadingBar).
+   §5  SPLASH — masquage du contenu pendant le
+   chargement. Attribut bgzen-loading posé par
+   bg-zen.uc.js sur l'ANCÊTRE STABLE
+   #tabbrowser-tabpanels (activation / reveal).
+   ⚠️ 05/09 : JAMAIS sur .browserSidebarContainer
+   deck-selected — sur une nav en nouvel onglet la
+   session part AVANT le switch du deck → on
+   masquait le container quitté, le nouveau
+   peignait par-dessus le splash dès son premier
+   paint (covering précoce). L'ancêtre couvre
+   TOUS les containers, quel que soit le timing
+   du switch.
    ============================================= */
 
-#tabbrowser-tabpanels .browserSidebarContainer[bgzen-loading] {
+#tabbrowser-tabpanels[bgzen-loading] .browserSidebarContainer {
   visibility: hidden !important;
 }
 
-/* La loading bar de MyLoadingBar vit dans ce conteneur (appendChild) —
-   on la ré-affiche : visibility est héritée mais surchargeable par
-   descendant, où que la barre vive dans le sous-arbre masqué. */
-#tabbrowser-tabpanels [bgzen-loading] #uc-loadingbar {
+/* La loading bar de MyLoadingBar vit dans le container actif
+   (appendChild, reparentée au deck-selected) — on la ré-affiche :
+   visibility est héritée mais surchargeable par descendant, où que
+   la barre vive dans le sous-arbre masqué. */
+#tabbrowser-tabpanels[bgzen-loading] #uc-loadingbar {
   visibility: visible !important;
 }
 
