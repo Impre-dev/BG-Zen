@@ -9,3 +9,6 @@ boot/*
 
 # Log debug runtime — data, jamais commité
 bgzen-debug.log
+
+# Copie d'ancien pool (data perso conservée hors git)
+backgrounds - Copie/*

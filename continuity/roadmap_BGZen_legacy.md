@@ -1,4 +1,10 @@
-# Roadmap BG-Zen
+# Roadmap BG-Zen — ARCHIVE (pré-refonte 10/10)
+
+> ⚠️ **Fichier archivé le 10/10** — remplacé par `continuity/roadmap_BGZen.md`.
+> Contexte : Utopia a remplacé Nebula-Fork comme socle translucide (désactivé
+> depuis le 06/09), et la direction produit a pivoté vers des comportements
+> adaptatifs au mode d'affichage de Zen. Ce fichier reste la référence des
+> versions livrées v0.1 → v0.7.6 (tableau Livré & poussé + commits).
 
 > Document de pilotage — statut au 05/09. La SPEC reste la référence architecture ;
 > ce fichier est la file de travail priorisée.

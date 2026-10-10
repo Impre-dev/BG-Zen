@@ -1,8 +1,16 @@
 /* ============================================
-   BG-Zen — chrome.css v0.2.0 (roadmap pt 1)
+   BG-Zen — chrome.css v0.8.0-wip (splash adaptatif)
    Deux couches dans #main-window (isolation §0) :
    • #bgzen-layer         → repos, glass CONSTANT (var --bgzen-blur)
-   • #bgzen-loading-layer → loading screen nette, fade + blur en sortie
+   • #bgzen-loading-layer → splash plein-fenêtre, UNIQUEMENT
+     quand la sidebar est masquée (compact + hide-tabbar) —
+     sinon réchauffeur GPU inerte (0.01)
+   • §1ter ::before des .browserSidebarContainer → splash
+     DANS la zone contenu quand la sidebar est visible
+     (mécanique miroir de la couche : flip cash, de-blur
+     entrée, fade+blur sortie, teinte noire propre)
+   Prédicat « sidebar masquée » = combo leçon 5 Utopia :
+   @media -moz-pref(hide-tabbar) + attribut zen-compact-mode.
    Vars posées par bg-zen.uc.js :
    --bgzen-image, --bgzen-loading-image, --bgzen-blur, --bgzen-exit
    ⚠️ NE JAMAIS peindre d'image sur #main-window (bug transparence).
@@ -18,6 +26,12 @@
   /* --bgzen-image: url("file:///...");          repos    */
   /* --bgzen-loading-image: url("file:///...");  loading  */
   /* --bgzen-blur: 10px;  --bgzen-exit: 400ms;             */
+
+  /* --- Teinte du splash par-container (§1ter) ---
+     NOIRE, propre au loading screen — indépendante du voile
+     Utopia (réservé à l'UI au repos). Valeur de départ,
+     à caler au test visuel. */
+  --bgzen-loading-tint: rgba(0, 0, 0, 0.2);
 }
 
 /* =============================================
@@ -50,10 +64,14 @@
 }
 
 /* =============================================
-   §1bis  COUCHE LOADING — par-dessus la couche
-   repos (même z-index, après dans le DOM).
-   Entrée : rapide (150ms). Sortie : fade + blur
-   montants sur --bgzen-exit (anim pt 5 roadmap).
+   §1bis  COUCHE LOADING — plein-fenêtre UNIQUEMENT
+   quand la sidebar est masquée (§5). Défaut
+   (sidebar visible) : réchauffeur GPU inerte à
+   0.01 — la texture reste en VRAM entre les
+   sessions (leçon 5), le splash est porté par
+   le §1ter.
+   Sortie (état de base) : fade + blur montants
+   sur --bgzen-exit (anim pt 5 roadmap).
    ============================================= */
 
 #bgzen-loading-layer {
@@ -80,12 +98,67 @@
     filter var(--bgzen-exit, 400ms) ease;
 }
 
-#bgzen-loading-layer[bgzen-active] {
+/* Activation PLEIN-FENÊTRE : sidebar masquée uniquement.
+   Combo leçon 5 Utopia : media pref (config) + attribut
+   zen-compact-mode (état compact réellement actif, toggle
+   H en live). En dehors : la règle ne matche pas, la couche
+   reste à 0.01 = réchauffeur (voir §1ter qui peint). */
+@media (-moz-pref("zen.view.compact.hide-tabbar")) {
+  :root[zen-compact-mode="true"] #bgzen-loading-layer[bgzen-active] {
+    opacity: 1;
+    filter: blur(0px);
+    /* Entrée CASH : opaque frame 0 — l'image est pré-tirée et posée en
+       synchrone au START, le repos n'est jamais visible. Seul le de-blur
+       anime. La sortie (état de base) garde son fade + blur montant. */
+    transition:
+      opacity 0s,
+      filter var(--bgzen-enter, 300ms) ease;
+  }
+}
+
+/* =============================================
+   §1ter  SPLASH PAR-CONTAINER — sidebar visible.
+   Le splash vit DANS la zone contenu : la
+   sidebar et les toolbars ne sont plus couvertes.
+   Mécanique MIROIR de la couche (leçon 5) :
+   ::before toujours peint à 0.01 → texture
+   WebRender chaude ; flip CASH à l'attribut
+   (opaque frame 0 + de-blur entrée) ; fade +
+   blur montants en sortie (le retrait de
+   l'attribut revient à la base).
+   Teinte noire propre empilée SUR l'image
+   (--bgzen-loading-tint) — indépendante du
+   voile Utopia.
+   ============================================= */
+
+.browserSidebarContainer {
+  position: relative; /* containing block du ::before — et ancrage
+     déjà attendu par #uc-loadingbar (bottom:0 du container) */
+}
+
+.browserSidebarContainer::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2; /* au-dessus du browser, SOUS #uc-loadingbar (z 9999) */
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--bgzen-loading-tint), var(--bgzen-loading-tint)),
+    var(--bgzen-loading-image);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: 0.01;
+  filter: blur(16px);
+  transition:
+    opacity var(--bgzen-exit, 400ms) ease,
+    filter var(--bgzen-exit, 400ms) ease;
+}
+
+.browserSidebarContainer[bgzen-loading]::before {
   opacity: 1;
   filter: blur(0px);
-  /* Entrée CASH : opaque frame 0 — l'image est pré-tirée et posée en
-     synchrone au START, le repos n'est jamais visible. Seul le de-blur
-     anime. La sortie (état de base) garde son fade + blur montant. */
+  /* Entrée CASH : opaque frame 0 + de-blur — miroir de la couche */
   transition:
     opacity 0s,
     filter var(--bgzen-enter, 300ms) ease;
@@ -183,14 +256,20 @@ html[nebula-compact-mode] #browser:has(.browserSidebarContainer[bgzen-loading]):
 }
 
 /* =============================================
-   §5  SPLASH — masquage total du wrapper pendant
-   le chargement. Attribut bgzen-loading posé par
-   bg-zen.uc.js (STATE_START / STATE_STOP),
-   reveal à 850ms (synchro MyLoadingBar).
+   §5  SPLASH — masquage total du wrapper,
+   UNIQUEMENT en plein-fenêtre (sidebar masquée
+   = compact + hide-tabbar, cf. §1bis). Défaut
+   (sidebar visible) : le contenu est couvert par
+   le ::before du §1ter, le container reste
+   visible — la sidebar respire.
+   Attribut bgzen-loading posé par
+   bg-zen.uc.js (STATE_START / STATE_STOP).
    ============================================= */
 
-#tabbrowser-tabpanels .browserSidebarContainer[bgzen-loading] {
-  visibility: hidden !important;
+@media (-moz-pref("zen.view.compact.hide-tabbar")) {
+  :root[zen-compact-mode="true"] #tabbrowser-tabpanels .browserSidebarContainer[bgzen-loading] {
+    visibility: hidden !important;
+  }
 }
 
 /* La loading bar de MyLoadingBar vit dans ce conteneur (appendChild) —

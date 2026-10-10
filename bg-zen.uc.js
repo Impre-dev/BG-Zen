@@ -760,8 +760,10 @@
         if (!startSession?.('TabSelect')) dbg('🖱️ TabSelect fraîche — session déjà en cours');
         return;
       }
-      // Tab chargée : changement de site à l'écran → tirage live voulu.
-      Resolver.resolveRest(getDomain(b));
+      // Tab chargée : RIEN (07/09). Le tirage live au switch datait du fix
+      // flash v3 — pénible à l'usage : re-tirage à CHAQUE switch entre
+      // domaines. Le fond suit désormais les navs uniquement (tirage repos
+      // au STOP). Un simple switch ne doit jamais toucher au fond.
     });
   }
 
