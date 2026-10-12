@@ -17,3 +17,4 @@ file est sur le splash adaptatif en attendant sa réponse.
 - [feature] v0.8.0-wip **splash adaptatif** livré et validé live (`dd8853a`) : zone-contenu si sidebar visible (::before + teinte noire), plein-fenêtre si masquée — JS inchangé
 - [workflow] **Régime v2 acté** : le repo vit dans l'install (migration BG-Zen `dd8853a`, historique préservé, source archivée `BG-Zen.archived-2026-10-10`) ; skill sine-workflow + règle navigateur-workspace réécrits. Push restant à la décision d'Impre
 - [divers] dossier source résiduel `Sine-Mods/BG-Zen/continuity/` (vide) tenu par un process (VSCode ?) — à supprimer à la fermeture/reboot
+- [fix] v0.8.1 vieux bug splash figé (switch pendant chargement) tué : reveal à distance + filet + TabClose (`592b4cd`) — validé live par Impre
