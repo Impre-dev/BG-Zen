@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           BG-Zen
-// @version        0.6.2
+// @version        0.8.1
 // @description    Wallpaper derrière l'UI de Zen — pools repos/loading, glass constant, splash
 // @author         Impre
 // @include        main
@@ -643,6 +643,13 @@
   function setupProgress(loadingLayer) {
     let unmaskTimer = null; // LAST RESORT: reveal différé = synchro barre (barTotalMs)
     let lastRevealAt = 0; // anti double-image : pas de re-tirage juste après un reveal
+    // Option B (fix vieux bug splash figé) : la session retient SON browser et
+    // SON container — le reveal suit le STOP de CE browser même si la tab a
+    // été quittée pendant le chargement (sinon le STOP est filtré comme bruit
+    // background et l'attribut reste orphelin = splash figé + garde bloquée).
+    let sessionBrowser = null;
+    let sessionContainer = null;
+    let revealIfOrphaned = null; // filet (option A) — posé plus bas, consommé par setupTabSelect
 
     // ⚠️ Fix flash v3 (05/09) : appelée AUSSI depuis TabSelect. Sélection
     // d'une tab fraîche → la page quittée (ex: CustomTab OPAQUE) laisse
@@ -650,7 +657,7 @@
     // le START. On couvre à l'event même, l'image CASH est déjà décodée.
     // Garde incluse (splash actif → rien) : le START qui suit l'ouverture
     // d'onglet est absorbé sans re-tirage. Le tirage repos reste au STOP (v2).
-    startSession = (origin) => {
+    startSession = (origin, browser) => {
       if (loadingLayer.hasAttribute('bgzen-active')) return false;
       clearTimeout(unmaskTimer); // reveal différé annulé : nouvelle session
       // (05/09 : grâce supprimée — le splash CASH opaque frame 0 rend le
@@ -658,11 +665,17 @@
       // désormais dans la queue shuffle, chaque image 1× par passe.)
       const detail = lastRevealAt ? ` (reveal il y a ${Math.round(Date.now() - lastRevealAt)}ms)` : ' (première session)';
       dbg(`🎬 SESSION ${origin} — tirage${detail}`);
-      const container = document.querySelector('.browserSidebarContainer.deck-selected');
+      // La session retient SON browser/container : le splash appartient à la
+      // tab, pas au deck — le reveal le retirera même hors sélection.
+      sessionBrowser = browser ?? null;
+      const container =
+        browser?.closest('.browserSidebarContainer') ??
+        document.querySelector('.browserSidebarContainer.deck-selected');
+      sessionContainer = container;
       const activate = (msg) => {
         loadingLayer.setAttribute('bgzen-active', '');
         dbg(`   ${msg}`);
-        container?.toggleAttribute('bgzen-loading', true); // wrapper masqué (§5)
+        container?.toggleAttribute('bgzen-loading', true); // splash (§5 / §1ter)
       };
       if (Resolver.applyLoading()) {
         activate(`▶️ SPLASH ACTIF CASH (opaque 0s + de-blur ${CONFIG.enterMs}ms)`);
@@ -681,8 +694,12 @@
             dbgV(`non top-level — ignoré ${safeUrl(request, browser)}`);
             return;
           }
-          if (browser !== gBrowser.selectedBrowser) {
-            dbgV(`tab non sélectionné — ignoré ${safeUrl(request, browser)}`);
+          // Option B : les événements du browser DE SESSION passent (son STOP
+          // doit révéler même hors sélection). Les autres tabs background
+          // restent du bruit — la sélectionnée aussi passe.
+          const isSessionBrowser = browser && browser === sessionBrowser;
+          if (!isSessionBrowser && browser !== gBrowser.selectedBrowser) {
+            dbgV(`tab background hors session — ignoré ${safeUrl(request, browser)}`);
             return;
           }
 
@@ -694,9 +711,14 @@
           // complet se lit verticalement : 🌐 START → 🎬 SESSION → 🌐 STOP
           // → TIRAGE repos → ✅ REVEAL → prefetch.
           dbg(`🌐 ${kind} ${url}`);
-          const container = document.querySelector('.browserSidebarContainer.deck-selected');
 
           if (stateFlags & WPL.STATE_START) {
+            // Le START reste sélection-only (leçon 9) : pas de session créée
+            // en arrière-plan — un splash invisible n'a pas de spectateur.
+            if (browser !== gBrowser.selectedBrowser) {
+              dbgV(`START hors sélection — ignoré (session ${isSessionBrowser ? 'active' : 'aucune'})`);
+              return;
+            }
             clearTimeout(unmaskTimer);
             dbgV('reveal timer ANNULÉ (START)');
 
@@ -704,32 +726,41 @@
             // TabSelect). Splash déjà actif (redirect, reload, tab fraîche
             // déjà couverte) → on ne touche à RIEN : zéro flash, zéro 2e image.
             // Pas de tirage repos ici (v2) : le STOP de session tire, couvert.
-            if (!startSession?.('START')) dbg('↳ START ignoré — session en cours (splash actif)');
+            if (!startSession?.('START', browser)) dbg('↳ START ignoré — session en cours (splash actif)');
+            return;
           }
 
           if (stateFlags & WPL.STATE_STOP) {
             clearTimeout(unmaskTimer);
+            const selected = browser === gBrowser.selectedBrowser;
             // ⚠️ Fix flash 04/09 v2 : tirage repos ICI — le splash est
             // encore actif (reveal à 1000ms), la couche couvre tout.
             // Le nouveau fonds se pose dessous + warm-up décodage, et le
             // fade de sortie du reveal le révèle en crossfade natif.
             // Zéro fenêtre de paint parasite possible.
-            Resolver.resolveRest(getDomain(browser));
+            // ⚠️ Option B : tirage SEULEMENT si la tab est à l'écran — le
+            // fond ne change jamais pour une tab invisible (sinon flash du
+            // fond sous la tab vue). Le reveal, lui, suit la session.
+            if (selected) Resolver.resolveRest(getDomain(browser));
             // Au boot en press start : le reveal se joue DERRIÈRE le
             // splash full-UI (invisible) → cd boot dédié (test 0),
             // barTotalMs intact pour les navigations normales.
             const cd = BootSplash.waitMode && !BootSplash.done ? CONFIG.bootRevealCdMs : CONFIG.barTotalMs;
             unmaskTimer = setTimeout(() => {
               loadingLayer.removeAttribute('bgzen-active'); // fade + blur sortant
-              container?.toggleAttribute('bgzen-loading', false); // reveal
+              // Reveal de LA SESSION : le container retenu au START — la
+              // tab a pu être quittée depuis (splash levé à distance).
+              sessionContainer?.toggleAttribute('bgzen-loading', false);
+              sessionBrowser = null;
+              sessionContainer = null;
               lastRevealAt = Date.now();
-              dbg(`✅ REVEAL (fin anim ${CONFIG.exitMs}ms)`);
+              dbg(`✅ REVEAL (fin anim ${CONFIG.exitMs}ms)${selected ? '' : ' [à distance]'}`);
               BootSplash.finish('1er REVEAL'); // boot splash : on rend la main à l'UI
               // Pré-tirage de la prochaine image — ne touche pas la
               // var (fade de sortie intact), event-chained, zéro timer.
               Resolver.prefetchLoading();
             }, cd);
-            dbg(`   reveal dans ${cd}ms`);
+            dbg(`   reveal dans ${cd}ms${selected ? '' : ' (à distance)'}`);
           }
         } catch (ex) {
           dbg(`‼️ EXCEPTION onStateChange: ${ex.message}`);
@@ -742,6 +773,38 @@
       onSecurityChange() {},
       onContentBlockingEvent() {},
     };
+
+    // Filet (option A) : retour sur une tab CHARGÉE dont le container porte
+    // encore le splash = état orphelin (reveal raté par un chemin imprévu).
+    // Rattrapage sec : retirer l'attribut + débloquer la garde. Garde : un
+    // reveal programmé (grâce en cours) ne doit jamais être cassé.
+    revealIfOrphaned = (browser) => {
+      if (unmaskTimer) return; // grâce/reveal programmé — le timer s'en charge
+      const c = browser?.closest('.browserSidebarContainer');
+      if (c?.hasAttribute('bgzen-loading')) {
+        c.removeAttribute('bgzen-loading');
+        loadingLayer.removeAttribute('bgzen-active');
+        sessionBrowser = null;
+        sessionContainer = null;
+        lastRevealAt = Date.now();
+        dbg('🧹 REVEAL rattrapé (filet — splash orphelin sur tab chargée)');
+        Resolver.prefetchLoading();
+      }
+    };
+
+    // TabClose : si la tab de session meurt en cours de chargement, AUCUN
+    // STOP ne viendra → clôturer la session à la main (sinon bgzen-active
+    // bloque toutes les sessions suivantes, cf. leçon 9).
+    gBrowser.tabContainer.addEventListener('TabClose', (event) => {
+      const b = event.target?.linkedBrowser;
+      if (b && b === sessionBrowser) {
+        clearTimeout(unmaskTimer);
+        loadingLayer.removeAttribute('bgzen-active');
+        sessionBrowser = null;
+        sessionContainer = null;
+        dbg('🗑️ TabClose — session clôturée (tab de session fermée en chargement)');
+      }
+    });
 
     gBrowser.addTabsProgressListener(listener);
   }
@@ -757,13 +820,12 @@
       // le START suivant est absorbé par la garde de session.
       if (!b || b.webProgress?.isLoadingDocument || getDomain(b) === '') {
         if (BootSplash.waitMode && !BootSplash.done) return; // boot splash couvre déjà tout
-        if (!startSession?.('TabSelect')) dbg('🖱️ TabSelect fraîche — session déjà en cours');
+        if (!startSession?.('TabSelect', b)) dbg('🖱️ TabSelect fraîche — session déjà en cours');
         return;
       }
-      // Tab chargée : RIEN (07/09). Le tirage live au switch datait du fix
-      // flash v3 — pénible à l'usage : re-tirage à CHAQUE switch entre
-      // domaines. Le fond suit désormais les navs uniquement (tirage repos
-      // au STOP). Un simple switch ne doit jamais toucher au fond.
+      // Tab chargée : RIEN pour le fond (07/09 — le fond suit les navs).
+      // Filet (option A) : splash orphelin sur tab chargée → rattrapé sec.
+      revealIfOrphaned?.(b);
     });
   }
 
@@ -795,7 +857,7 @@
     }
     loadingLayerEl = layers.loading; // consommé par Resolver.warmTexture()
 
-    dbg(`══════ BG-Zen v0.7.4 — fenêtre ${WTAG} — debug ${CONFIG.debug ? 'ACTIF' : 'off'} ══════`);
+    dbg(`══════ BG-Zen v0.8.1 — fenêtre ${WTAG} — debug ${CONFIG.debug ? 'ACTIF' : 'off'} ══════`);
     dbg(`CONFIG enter=${CONFIG.enterMs}ms exit=${CONFIG.exitMs}ms bar=${CONFIG.barTotalMs}ms verbose=${CONFIG.debugVerbose}`);
 
     // Pré-tirage de la 1ère image de loading : invisible pendant le
@@ -811,7 +873,7 @@
     // en mode nav — attribut posé avant le 1er paint, aucun flash.
     if (BootSplash.isStartupWindow()) BootSplash.install();
     else document.getElementById('main-window')?.setAttribute('bgzen-booted', '');
-    log('init v0.6.2 — press start réactif : hint cash au 1er STOP (bootRevealCdMs=0, barTotalMs intact)');
+    log('init v0.8.1 — reveal à distance (option B) + filet orphelin (option A)');
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') init();
