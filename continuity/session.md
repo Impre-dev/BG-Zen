@@ -18,3 +18,5 @@ file est sur le splash adaptatif en attendant sa réponse.
 - [workflow] **Régime v2 acté** : le repo vit dans l'install (migration BG-Zen `dd8853a`, historique préservé, source archivée `BG-Zen.archived-2026-10-10`) ; skill sine-workflow + règle navigateur-workspace réécrits. Push restant à la décision d'Impre
 - [divers] dossier source résiduel `Sine-Mods/BG-Zen/continuity/` (vide) tenu par un process (VSCode ?) — à supprimer à la fermeture/reboot
 - [fix] v0.8.1 vieux bug splash figé (switch pendant chargement) tué : reveal à distance + filet + TabClose (`592b4cd`) — validé live par Impre
+- [fix staged] v0.8.2 : hoist `revealIfOrphaned` au scope module (bug 828 du 12/10) — en attente validation opérateur
+- [jalon] v0.8.2 validé opérateur : plus de ReferenceError au TabSelect, splash intact
