@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name           BG-Zen
-// @version        0.8.1
+// @version        0.8.2
 // @description    Wallpaper derrière l'UI de Zen — pools repos/loading, glass constant, splash
 // @author         Impre
 // @include        main
@@ -649,7 +649,6 @@
     // background et l'attribut reste orphelin = splash figé + garde bloquée).
     let sessionBrowser = null;
     let sessionContainer = null;
-    let revealIfOrphaned = null; // filet (option A) — posé plus bas, consommé par setupTabSelect
 
     // ⚠️ Fix flash v3 (05/09) : appelée AUSSI depuis TabSelect. Sélection
     // d'une tab fraîche → la page quittée (ex: CustomTab OPAQUE) laisse
@@ -808,6 +807,11 @@
 
     gBrowser.addTabsProgressListener(listener);
   }
+
+  // Filet (option A) — posé par setupProgress (closure), consommé par
+  // setupTabSelect. ⚠️ v0.8.1 l'avait déclaré DANS setupProgress →
+  // ReferenceError à chaque TabSelect sur tab chargée (hors de portée).
+  let revealIfOrphaned = null;
 
   function setupTabSelect() {
     gBrowser.tabContainer.addEventListener('TabSelect', () => {
